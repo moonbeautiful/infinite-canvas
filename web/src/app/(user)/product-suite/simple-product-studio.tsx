@@ -95,6 +95,7 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
     const [tasks, setTasks] = useState<MarketingTask[]>(createTasks);
     const [generating, setGenerating] = useState(false);
     const [activeTaskId, setActiveTaskId] = useState<MarketingTaskId | "">("");
+    const [activeAttempt, setActiveAttempt] = useState(1);
     const [startedAt, setStartedAt] = useState(0);
     const [elapsed, setElapsed] = useState(0);
     const [connection, setConnection] = useState<GotoccConnection | null>(null);
@@ -237,7 +238,18 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
         setActiveTaskId(task.id);
         const references = await referencesForTask(task, heroUrl);
         const prompt = buildMarketingPrompt(task, Boolean(heroUrl && task.id !== "hero" && task.id !== "marketplace"));
-        return generateGotoccProductImage(connection as GotoccConnection, references, prompt, task.size, signal);
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+            setActiveAttempt(attempt);
+            try {
+                return await generateGotoccProductImage(connection as GotoccConnection, references, prompt, task.size, signal);
+            } catch (error) {
+                lastError = error;
+                if (signal.aborted || attempt === 2 || !shouldRetry(error)) throw error;
+                await waitForRetry(signal);
+            }
+        }
+        throw lastError;
     };
 
     const generateSuite = async () => {
@@ -280,6 +292,7 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
             abortRef.current = null;
             setGenerating(false);
             setActiveTaskId("");
+            setActiveAttempt(1);
         }
 
         if (controller.signal.aborted) message.info("已停止，已完成的图片会保留");
@@ -294,7 +307,7 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
         }
         modal.confirm({
             title: "重新生成整套 6 张？",
-            content: "现有结果会被替换，预计再次消耗 $0.36。",
+            content: "现有结果会被替换，基础费用约 $0.48；异常自动重试可能增加用量。",
             okText: "确认生成",
             cancelText: "取消",
             onOk: generateSuite,
@@ -323,6 +336,7 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
             abortRef.current = null;
             setGenerating(false);
             setActiveTaskId("");
+            setActiveAttempt(1);
         }
     };
 
@@ -434,13 +448,13 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
 
                     <section className="mt-5">
                         <div className="mb-3 flex items-center justify-between text-xs text-black/50 dark:text-white/50">
-                            <span>整套 6 张 · 约 8-12 分钟</span>
-                            <span>预计 $0.36</span>
+                            <span>整套 6 张 · 约 8-15 分钟</span>
+                            <span>基础约 $0.48</span>
                         </div>
                         {generating ? (
                             <div className="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
                                 <Button block size="large" className="!h-12" icon={<LoaderCircle className="size-4 animate-spin" />} disabled>
-                                    {activeTask ? `${activeTask.label} · ${formatTime(elapsed)}` : "正在准备"}
+                                    {activeTask ? `${activeTask.label}${activeAttempt > 1 ? " · 自动重试" : ""} · ${formatTime(elapsed)}` : "正在准备"}
                                 </Button>
                                 <Button danger size="large" className="!h-12 !w-11 !p-0" aria-label="停止生成" title="停止生成" icon={<StopCircle className="size-4" />} onClick={stopGeneration} />
                             </div>
@@ -449,7 +463,7 @@ export function SimpleProductStudio({ onOpenAdvanced }: { onOpenAdvanced: () => 
                                 {completedTasks.length ? "重新生成整套 6 张" : "一键生成整套 6 张"}
                             </Button>
                         )}
-                        <p className="mt-2 text-xs leading-5 text-black/40 dark:text-white/40">先生成品牌主视觉，后续图片自动沿用同一套色彩、光影和商品外观。</p>
+                        <p className="mt-2 text-xs leading-5 text-black/40 dark:text-white/40">先生成品牌主视觉，后续图片沿用同一视觉系统；异常时自动重试一次，可能增加用量。</p>
                     </section>
 
                     <section className="mt-6">
@@ -622,4 +636,23 @@ function formatTime(seconds: number) {
     const minutes = Math.floor(seconds / 60);
     const remainder = seconds % 60;
     return minutes ? `${minutes}:${String(remainder).padStart(2, "0")}` : `${remainder}s`;
+}
+
+function shouldRetry(error: unknown) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    return !["key", "额度", "401", "403", "已停止"].some((text) => message.includes(text));
+}
+
+function waitForRetry(signal: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        const abort = () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+        };
+        const timer = window.setTimeout(() => {
+            signal.removeEventListener("abort", abort);
+            resolve();
+        }, 1500);
+        signal.addEventListener("abort", abort, { once: true });
+    });
 }
