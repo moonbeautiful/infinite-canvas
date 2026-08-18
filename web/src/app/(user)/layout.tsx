@@ -16,6 +16,7 @@ export default function UserLayout({ children }: { children: ReactNode }) {
     const isReady = useUserStore((state) => state.isReady);
     const wasLoggedOutRef = useRef(false);
     const isProtectedPage = protectedPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+    const isProductAgent = pathname === "/product-suite";
 
     useEffect(() => {
         if (!isReady || !isProtectedPage || user) return;
@@ -32,26 +33,24 @@ export default function UserLayout({ children }: { children: ReactNode }) {
         const token = useUserStore.getState().token;
         if (!token) return;
         wasLoggedOutRef.current = false;
-        fetchUserConfig(token).then(async (config) => {
-            const syncEnabled = config.syncCapabilities?.userData === true;
-            const { useCanvasStore } = await import("@/app/(user)/canvas/stores/use-canvas-store");
-            const canvasStore = useCanvasStore.getState();
-            canvasStore.setSyncEnabled(syncEnabled);
-            if (
-                syncCanvasAfterLogin &&
-                syncEnabled &&
-                canvasStore.hydrated
-            ) {
-                void canvasStore.syncWithRemote(token, true);
-            }
-            const { useAssetStore } = await import("@/stores/use-asset-store");
-            void useAssetStore.getState().hydrateAccountAssets(token, syncEnabled);
-        }).catch(() => { });
+        fetchUserConfig(token)
+            .then(async (config) => {
+                const syncEnabled = config.syncCapabilities?.userData === true;
+                const { useCanvasStore } = await import("@/app/(user)/canvas/stores/use-canvas-store");
+                const canvasStore = useCanvasStore.getState();
+                canvasStore.setSyncEnabled(syncEnabled);
+                if (syncCanvasAfterLogin && syncEnabled && canvasStore.hydrated) {
+                    void canvasStore.syncWithRemote(token, true);
+                }
+                const { useAssetStore } = await import("@/stores/use-asset-store");
+                void useAssetStore.getState().hydrateAccountAssets(token, syncEnabled);
+            })
+            .catch(() => {});
     }, [isReady, user]);
 
     return (
         <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
-            <AppTopNav />
+            {isProductAgent ? null : <AppTopNav />}
             <div className="min-h-0 min-w-0 w-full flex-1 overflow-hidden">{isProtectedPage && (!isReady || !user) ? null : children}</div>
         </div>
     );

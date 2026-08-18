@@ -76,7 +76,7 @@ export async function generateGotoccBackground(connection: GotoccConnection, pro
     return imageToDataUrl({ dataUrl: value });
 }
 
-export async function generateGotoccProductImage(connection: GotoccConnection, images: File[], prompt: string, size: string) {
+export async function generateGotoccProductImage(connection: GotoccConnection, images: File[], prompt: string, size: string, signal?: AbortSignal) {
     if (!images.length || images.length > 4) throw new Error("请上传 1 至 4 张商品图片");
     const form = new FormData();
     form.set("model", connection.model);
@@ -86,7 +86,13 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
     images.forEach((image) => form.append("image", image, image.name || "product.png"));
 
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 180_000);
+    let timedOut = false;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, 180_000);
     try {
         const response = await fetch("/api/gotocc/images/edits", {
             method: "POST",
@@ -105,9 +111,13 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
         if (!value) throw new Error("gotocc 没有返回商品图");
         return imageToDataUrl({ dataUrl: value });
     } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") throw new Error("生成超时，请重试");
+        if (error instanceof DOMException && error.name === "AbortError") {
+            if (signal?.aborted && !timedOut) throw new Error("已停止生成");
+            throw new Error("生成超时，请重试");
+        }
         throw error;
     } finally {
+        signal?.removeEventListener("abort", abort);
         window.clearTimeout(timeout);
     }
 }

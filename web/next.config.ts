@@ -16,6 +16,19 @@ export default function nextConfig(phase: string): NextConfig {
     return {
         output: "standalone",
         allowedDevOrigins: isDev ? ["*.*.*.*"] : [],
+        async redirects() {
+            return [
+                { source: "/", destination: "/product-suite", permanent: false },
+                { source: "/canvas", destination: "/product-suite", permanent: false },
+                { source: "/canvas/:path*", destination: "/product-suite", permanent: false },
+                { source: "/image", destination: "/product-suite", permanent: false },
+                { source: "/video", destination: "/product-suite", permanent: false },
+                { source: "/prompts", destination: "/product-suite", permanent: false },
+                { source: "/assets", destination: "/product-suite", permanent: false },
+                { source: "/asset-library", destination: "/product-suite", permanent: false },
+                { source: "/workflows", destination: "/product-suite", permanent: false },
+            ];
+        },
         typescript: {
             ignoreBuildErrors: true,
         },
