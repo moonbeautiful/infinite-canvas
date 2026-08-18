@@ -23,6 +23,8 @@ func New() *gin.Engine {
 	api.GET("/auth/me", middleware.OptionalAuth, gin.WrapF(handler.CurrentUser))
 	api.GET("/settings", gin.WrapF(handler.Settings))
 	api.GET("/storage/config", gin.WrapF(handler.StorageConfig))
+	api.GET("/gotocc/models", gin.WrapF(handler.GotoccModels))
+	api.POST("/gotocc/images/generations", gin.WrapF(handler.GotoccImageGenerations))
 	api.GET("/media/references/:id", func(c *gin.Context) {
 		handler.ReferenceMedia(c.Writer, c.Request, c.Param("id"))
 	})

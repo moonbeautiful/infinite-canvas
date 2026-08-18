@@ -1,27 +1,20 @@
 "use client";
 
-import { App, Button, Input, Segmented, Select, Slider, Tag } from "antd";
+import { App, Button, Input, Modal, Segmented, Select, Slider, Tag } from "antd";
 import { zipSync } from "fflate";
-import { Check, Download, ImagePlus, LoaderCircle, LockKeyhole, RefreshCw, Sparkles, Upload, WandSparkles } from "lucide-react";
+import { Check, Download, ExternalLink, ImagePlus, KeyRound, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Upload, WandSparkles } from "lucide-react";
 import { saveAs } from "file-saver";
-import { nanoid } from "nanoid";
 import { useEffect, useMemo, useState } from "react";
 
-import { ModelPicker } from "@/components/model-picker";
 import { readFileAsDataUrl } from "@/lib/image-utils";
-import { createCanvasImageTask, pollCanvasImageTaskStatus, requestGeneration } from "@/services/api/image";
-import { imageToDataUrl } from "@/services/image-storage";
-import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { clearGotoccConnection, generateGotoccBackground, loadGotoccConnection, saveGotoccConnection, testGotoccConnection, type GotoccConnection } from "@/services/api/gotocc";
 
-import { composeProductAd, extractProductFromWhiteBackground, extractProductWithAi, productTemplates, templateRatioLabel, type ProductCutout } from "./product-compositor";
+import { composeProductAd, extractProductFromWhiteBackground, extractProductWithAi, productAspectDimensions, productAspectLabel, productTemplates, templateRatioLabel, type ProductCutout } from "./product-compositor";
+import { analyzeProductFacts, buildQualityReport, inferProductCategory, repairFrame, type ProductFacts } from "./product-analysis";
 import { buildSuiteFrames, categoryPreset, categoryPresets, createDefaultProfile, type ProductCategoryId, type ProductProfile, type SuiteFrame } from "./product-profiles";
 
 export default function ProductSuitePage() {
     const { message } = App.useApp();
-    const effectiveConfig = useEffectiveConfig();
-    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
-    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
-    const updateConfig = useConfigStore((state) => state.updateConfig);
 
     const [profile, setProfile] = useState<ProductProfile>(() => createDefaultProfile());
     const [activeFrameIndex, setActiveFrameIndex] = useState(0);
@@ -46,12 +39,61 @@ export default function ProductSuitePage() {
     const [neutralColor, setNeutralColor] = useState(defaultPalette.neutral);
     const [darkColor, setDarkColor] = useState(defaultPalette.dark);
     const [sourceHash, setSourceHash] = useState("");
+    const [productFacts, setProductFacts] = useState<ProductFacts | null>(null);
+    const [gotoccConnection, setGotoccConnection] = useState<GotoccConnection | null>(null);
+    const [gotoccStatus, setGotoccStatus] = useState<"idle" | "checking" | "connected" | "error">("idle");
+    const [connectionOpen, setConnectionOpen] = useState(false);
+    const [connectionKey, setConnectionKey] = useState("");
+    const [connecting, setConnecting] = useState(false);
 
     const suiteFrames = useMemo(() => buildSuiteFrames(profile).map((frame) => ({ ...frame, ...frameOverrides[frame.id] })), [frameOverrides, profile]);
     const activeFrame = suiteFrames[activeFrameIndex] || suiteFrames[0];
     const background = backgrounds[activeFrame.id];
-    const model = effectiveConfig.imageModel || effectiveConfig.model;
     const preparedBackgrounds = suiteFrames.filter((frame) => frame.template === "catalog" || backgrounds[frame.id]).length;
+    const qualityReport = useMemo(
+        () => buildQualityReport({ frame: activeFrame, cutout: productCutout, facts: productFacts, sourceHash, background }),
+        [activeFrame, background, productCutout, productFacts, sourceHash],
+    );
+
+    useEffect(() => {
+        const saved = loadGotoccConnection();
+        if (!saved) return;
+        setGotoccConnection(saved);
+        setGotoccStatus("checking");
+    }, []);
+
+    useEffect(() => {
+        if (!gotoccConnection) return;
+        let active = true;
+        void testGotoccConnection(gotoccConnection.apiKey)
+            .then(() => {
+                if (active) setGotoccStatus("connected");
+            })
+            .catch(() => {
+                if (active) setGotoccStatus("error");
+            });
+        return () => {
+            active = false;
+        };
+    }, [gotoccConnection?.apiKey]);
+
+    useEffect(() => {
+        if (!productSource || !productCutout) {
+            setProductFacts(null);
+            return;
+        }
+        let active = true;
+        void analyzeProductFacts(productSource, productCutout)
+            .then((facts) => {
+                if (active) setProductFacts(facts);
+            })
+            .catch(() => {
+                if (active) setProductFacts(null);
+            });
+        return () => {
+            active = false;
+        };
+    }, [productCutout, productSource]);
 
     useEffect(() => {
         if (!productCutout) {
@@ -93,6 +135,7 @@ export default function ProductSuitePage() {
             neutralColor,
             darkColor,
             outputSize,
+            aspectRatio: frame.aspectRatio,
             productScale: frame.productScale,
             productOffsetX: frame.productOffsetX,
             productOffsetY: frame.productOffsetY,
@@ -104,7 +147,10 @@ export default function ProductSuitePage() {
     const handleProductFile = async (file?: File) => {
         if (!file) return;
         const dataUrl = await readFileAsDataUrl(file);
-        setProfile((value) => ({ ...value, name: file.name.replace(/\.[^.]+$/, "") || "商品" }));
+        const name = file.name.replace(/\.[^.]+$/, "") || "商品";
+        const inferredCategory = inferProductCategory(file.name);
+        if (inferredCategory) applyCategory(inferredCategory, name);
+        else setProfile((value) => ({ ...value, name }));
         setProductSource(dataUrl);
         setSourceHash(await sha256(file));
         await extractProduct(dataUrl);
@@ -205,30 +251,65 @@ export default function ProductSuitePage() {
         }));
     };
 
+    const connectGotocc = async () => {
+        setConnecting(true);
+        try {
+            const apiKey = connectionKey.trim() || gotoccConnection?.apiKey || "";
+            await testGotoccConnection(apiKey);
+            const connection: GotoccConnection = {
+                apiKey,
+                model: "gpt-image-2",
+                connectedAt: new Date().toISOString(),
+            };
+            saveGotoccConnection(connection);
+            setGotoccConnection(connection);
+            setGotoccStatus("connected");
+            setConnectionKey("");
+            setConnectionOpen(false);
+            message.success("gotocc 生图额度已连接");
+        } catch (error) {
+            setGotoccStatus("error");
+            message.error(error instanceof Error ? error.message : "gotocc 连接失败");
+        } finally {
+            setConnecting(false);
+        }
+    };
+
+    const disconnectGotocc = () => {
+        clearGotoccConnection();
+        setGotoccConnection(null);
+        setGotoccStatus("idle");
+        setConnectionKey("");
+        message.success("已断开 gotocc");
+    };
+
+    const repairActiveFrame = async () => {
+        updateActiveFrame(repairFrame(activeFrame));
+        if (qualityReport.checks.find((item) => item.id === "edge")?.status !== "pass" && productSource) {
+            await extractProduct();
+        }
+        message.success("已按质检结果校正版式与商品边缘");
+    };
+
     const handleBackgroundFile = async (file?: File) => {
         if (!file) return;
         setBackgrounds((value) => ({ ...value, [activeFrame.id]: URL.createObjectURL(file) }));
     };
 
     const requestBackground = async (frame: SuiteFrame, onStatus: (status: string) => void) => {
+        if (!gotoccConnection || gotoccStatus !== "connected") throw new Error("请先连接 gotocc 生图额度");
         const templateConfig = productTemplates.find((item) => item.id === frame.template) || productTemplates[0];
-        const config = {
-            ...effectiveConfig,
-            model,
-            imageModel: model,
-            count: "1",
-            quality: effectiveConfig.quality === "high" ? "high" : "medium",
-            size: "1:1",
-        };
         const prompt = [templateConfig.scenePrompt, frame.sceneDescription.trim(), "This is a background plate only. Keep the entire scene free of products and typography so an exact locked product cutout can be composited later."]
             .filter(Boolean)
             .join("\n\n");
-        return effectiveConfig.channelMode === "remote" ? generatePersistentBackground(config, prompt, onStatus) : generateDirectBackground(config, prompt);
+        onStatus("通过 gotocc 生成空背景");
+        const size = frame.aspectRatio === "portrait" ? "768x1024" : frame.aspectRatio === "landscape" ? "1536x640" : "1024x1024";
+        return generateGotoccBackground(gotoccConnection, prompt, size);
     };
 
     const generateBackground = async () => {
-        if (!isAiConfigReady(effectiveConfig, model)) {
-            openConfigDialog(true);
+        if (!gotoccConnection || gotoccStatus !== "connected") {
+            setConnectionOpen(true);
             return;
         }
         if (activeFrame.template === "catalog") {
@@ -250,8 +331,8 @@ export default function ProductSuitePage() {
     };
 
     const generateSuiteBackgrounds = async () => {
-        if (!isAiConfigReady(effectiveConfig, model)) {
-            openConfigDialog(true);
+        if (!gotoccConnection || gotoccStatus !== "connected") {
+            setConnectionOpen(true);
             return;
         }
         const targets = suiteFrames.filter((frame) => frame.template !== "catalog");
@@ -289,7 +370,7 @@ export default function ProductSuitePage() {
         const files: Record<string, Uint8Array> = {};
         for (const frame of suiteFrames) {
             const dataUrl = await renderCurrent(2048, frame.index);
-            const filename = `${safeFilename(profile.name)}-${String(frame.index + 1).padStart(2, "0")}-${frame.template}.png`;
+            const filename = `${safeFilename(profile.name)}-${String(frame.index + 1).padStart(2, "0")}-${frame.template}-${productAspectLabel(frame.aspectRatio).replace(":", "x")}.png`;
             files[filename] = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
         }
         const archive = Uint8Array.from(zipSync(files, { level: 0 }));
@@ -306,18 +387,14 @@ export default function ProductSuitePage() {
                     <Tag color="green">像素锁</Tag>
                 </div>
                 <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-                    <ModelPicker
-                        config={effectiveConfig}
-                        capability="image"
-                        value={model}
-                        channelId={effectiveConfig.imageChannelId}
-                        onChange={(value, channelId) => {
-                            updateConfig("imageModel", value);
-                            if (channelId) updateConfig("imageChannelId", channelId);
-                        }}
-                        onMissingConfig={() => openConfigDialog(false)}
-                        className="!w-full min-w-0 sm:!w-fit sm:flex-none"
-                    />
+                    <Tag>GPT Image 2</Tag>
+                    <Button
+                        icon={gotoccStatus === "checking" ? <LoaderCircle className="size-4 animate-spin" /> : gotoccStatus === "connected" ? <ShieldCheck className="size-4" /> : <KeyRound className="size-4" />}
+                        type={gotoccStatus === "connected" ? "default" : "primary"}
+                        onClick={() => setConnectionOpen(true)}
+                    >
+                        {gotoccStatus === "connected" ? "gotocc 已连接" : gotoccStatus === "checking" ? "检测连接" : "连接 gotocc 额度"}
+                    </Button>
                     <Button className="hidden sm:inline-flex" aria-label="导出整套 ZIP" title="导出整套 ZIP" icon={<Download className="size-4" />} disabled={!productCutout} onClick={() => void downloadSuite()}>
                         导出整套 ZIP
                     </Button>
@@ -350,6 +427,20 @@ export default function ProductSuitePage() {
                                 </span>
                             ) : null}
                         </div>
+                        {productFacts ? (
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-stone-500">
+                                <span>
+                                    原图 {productFacts.sourceWidth}×{productFacts.sourceHeight}
+                                </span>
+                                <span>主体占比 {Math.round(productFacts.coverage * 100)}%</span>
+                                <span>透明层 {productFacts.cutoutHash.slice(0, 8)}</span>
+                                <span className="flex items-center gap-1" aria-label="商品主色">
+                                    {productFacts.dominantColors.map((color) => (
+                                        <span key={color} className="size-4 border border-black/10" style={{ backgroundColor: color }} title={color} />
+                                    ))}
+                                </span>
+                            </div>
+                        ) : null}
                     </ControlSection>
 
                     <ControlSection title="商品档案">
@@ -441,6 +532,21 @@ export default function ProductSuitePage() {
                         <LabeledSlider label="细节横向" value={activeFrame.detailFocusX} min={0} max={1} step={0.01} onChange={(value) => updateActiveFrame({ detailFocusX: value })} />
                         <LabeledSlider label="细节纵向" value={activeFrame.detailFocusY} min={0} max={1} step={0.01} onChange={(value) => updateActiveFrame({ detailFocusY: value })} />
                     </ControlSection>
+
+                    <ControlSection title={`自动质检 · ${qualityReport.score}`}>
+                        <div className="divide-y divide-stone-200 dark:divide-stone-800">
+                            {qualityReport.checks.map((item) => (
+                                <div key={item.id} className="flex items-start gap-2 py-2 first:pt-0 last:pb-0" title={item.detail}>
+                                    <span className={`mt-1 size-2 shrink-0 ${item.status === "pass" ? "bg-emerald-500" : item.status === "warning" ? "bg-amber-500" : "bg-red-500"}`} />
+                                    <span className="text-xs">{item.label}</span>
+                                    <span className="ml-auto max-w-44 text-right text-xs text-stone-500">{item.detail}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <Button block icon={<RefreshCw className="size-4" />} disabled={!qualityReport.canRepair || extracting} onClick={() => void repairActiveFrame()}>
+                            一键修复
+                        </Button>
+                    </ControlSection>
                 </aside>
 
                 <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
@@ -449,13 +555,18 @@ export default function ProductSuitePage() {
                         <Tag>{activeFrame.type}</Tag>
                         <Tag>{activeFrame.task}</Tag>
                         <Tag>版式 {templateRatioLabel(activeFrame.template)}</Tag>
+                        <Tag>画幅 {productAspectLabel(activeFrame.aspectRatio)}</Tag>
                         <Tag color={productCutout ? "green" : "default"}>{productCutout ? "商品像素锁通过" : "等待商品"}</Tag>
-                        <span className="ml-auto text-xs text-stone-500">背景 {preparedBackgrounds}/6 · 版式误差 0.0%</span>
+                        <Tag color={qualityReport.score >= 90 ? "green" : qualityReport.score >= 70 ? "gold" : "red"}>质检 {qualityReport.score}</Tag>
+                        <span className="ml-auto text-xs text-stone-500">背景 {preparedBackgrounds}/6</span>
                     </div>
 
                     <div className="min-h-0 min-w-0 flex-1 overflow-auto bg-stone-100 p-4 lg:p-8 dark:bg-stone-950">
                         <div className="mx-auto flex min-h-full min-w-0 max-w-5xl items-center justify-center">
-                            <div className="relative aspect-square w-full max-w-[760px] overflow-hidden border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
+                            <div
+                                className="relative w-full max-w-[760px] overflow-hidden border border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900"
+                                style={{ aspectRatio: `${productAspectDimensions(activeFrame.aspectRatio, 1000)[0]} / ${productAspectDimensions(activeFrame.aspectRatio, 1000)[1]}` }}
+                            >
                                 {preview ? <img src={preview} alt="商品广告预览" className="size-full object-contain" /> : <div className="flex size-full items-center justify-center text-sm text-stone-400">上传商品原图</div>}
                                 {rendering ? (
                                     <div className="absolute inset-0 flex items-center justify-center bg-black/20">
@@ -515,6 +626,40 @@ export default function ProductSuitePage() {
                     </footer>
                 </section>
             </div>
+
+            <Modal
+                title="连接 gotocc 生图额度"
+                open={connectionOpen}
+                onCancel={() => setConnectionOpen(false)}
+                onOk={() => void connectGotocc()}
+                okText={gotoccStatus === "connected" ? "重新检测" : "连接"}
+                cancelText="关闭"
+                confirmLoading={connecting}
+                okButtonProps={{ disabled: !connectionKey.trim() && gotoccStatus !== "connected" }}
+            >
+                <div className="space-y-4">
+                    <div className="flex items-center gap-2 text-sm">
+                        <span className={`size-2 ${gotoccStatus === "connected" ? "bg-emerald-500" : gotoccStatus === "error" ? "bg-red-500" : "bg-stone-300"}`} />
+                        <span>{gotoccStatus === "connected" ? "GPT Image 2 生图额度已连接" : gotoccStatus === "error" ? "连接已失效，请重新粘贴 Key" : "粘贴一次，以后自动使用"}</span>
+                    </div>
+                    <Button icon={<ExternalLink className="size-4" />} onClick={() => window.open("https://gotocc.xyz/keys", "_blank", "noopener,noreferrer")}>
+                        打开 gotocc 密钥页
+                    </Button>
+                    <Input.Password
+                        aria-label="gotocc Key"
+                        value={connectionKey}
+                        onChange={(event) => setConnectionKey(event.target.value)}
+                        placeholder={gotoccStatus === "connected" ? "已保存，需要更换时再粘贴" : "粘贴 GPT image 2 生图分组的 sk- Key"}
+                        autoComplete="off"
+                    />
+                    <p className="text-xs leading-5 text-stone-500">Key 仅保存在当前浏览器。调用时经固定 gotocc 生图通道转发，不写入本站账号、数据库或日志。</p>
+                    {gotoccConnection ? (
+                        <Button danger onClick={disconnectGotocc}>
+                            断开连接
+                        </Button>
+                    ) : null}
+                </div>
+            </Modal>
         </main>
     );
 }
@@ -628,26 +773,6 @@ function ColorControl({ label, value, onChange }: { label: string; value: string
     );
 }
 
-async function generateDirectBackground(config: Parameters<typeof requestGeneration>[0], prompt: string) {
-    const images = await requestGeneration(config, prompt);
-    const image = images[0];
-    if (!image) throw new Error("接口没有返回背景图");
-    return imageToDataUrl(image);
-}
-
-async function generatePersistentBackground(config: Parameters<typeof createCanvasImageTask>[0], prompt: string, onStatus: (status: string) => void) {
-    let task = await createCanvasImageTask(config, prompt, [], { source: "workflow", sourceId: "product-suite", clientTaskId: `product-suite-${nanoid()}` });
-    for (let index = 0; index < 120; index += 1) {
-        const url = task.image_url || task.url;
-        if (url) return imageToDataUrl({ dataUrl: url, storageKey: task.storageKey });
-        if (["failed", "error"].includes(task.status.toLowerCase())) throw new Error(task.error?.message || task.error_detail || "背景生成失败");
-        onStatus(`生成背景 ${Math.max(1, Math.round(task.progress || 0))}%`);
-        await wait(3000);
-        task = await pollCanvasImageTaskStatus(task.parent_task_id || task.id);
-    }
-    throw new Error("背景生成超时");
-}
-
 async function sha256(file: File) {
     const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
     return Array.from(new Uint8Array(digest))
@@ -699,8 +824,4 @@ function toHex(color: { r: number; g: number; b: number }) {
 
 function safeFilename(value: string) {
     return value.trim().replace(/[\\/:*?"<>|]+/g, "-") || "product";
-}
-
-function wait(ms: number) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

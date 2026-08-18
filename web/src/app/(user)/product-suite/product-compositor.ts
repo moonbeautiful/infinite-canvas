@@ -1,6 +1,7 @@
 "use client";
 
-export type ProductTemplateId = "hero-split" | "selling-detail" | "info-panel" | "scene" | "asymmetric" | "catalog";
+export type ProductTemplateId = "hero-split" | "beauty-ribbon" | "soft-story" | "selling-detail" | "info-panel" | "scene" | "asymmetric" | "catalog";
+export type ProductAspectRatio = "square" | "portrait" | "landscape";
 
 export type ProductTemplate = {
     id: ProductTemplateId;
@@ -16,6 +17,20 @@ export const productTemplates: ProductTemplate[] = [
         type: "卖点图",
         scenePrompt:
             "Create a square empty commercial environment plate for the product category. Deep realistic perspective, premium international ecommerce campaign lighting, clear ground plane, restrained props, no product, no vehicle, no text, no letters, no numbers, no logo, no badge, no watermark.",
+    },
+    {
+        id: "beauty-ribbon",
+        name: "奢华丝绸静物",
+        type: "卖点图",
+        scenePrompt:
+            "Create an empty portrait 3:4 luxury beauty still-life background. Soft ivory studio wall, polished dark marble counter across the lower quarter, refined directional light, generous clean space in the upper half. No product, no fabric, no text, no letters, no logo, no badge, no watermark.",
+    },
+    {
+        id: "soft-story",
+        name: "A+ 陪伴横幅",
+        type: "卖点图",
+        scenePrompt:
+            "Create an empty panoramic 16:9 warm family bedroom background for an ecommerce A+ module. Gentle morning window light, ivory bedding, warm wood floor, broad calm negative space on the left and a believable placement area on the right. No product, no toy, no text, no letters, no logo, no badge, no watermark.",
     },
     {
         id: "selling-detail",
@@ -69,6 +84,7 @@ export type ComposeOptions = {
     neutralColor: string;
     darkColor: string;
     outputSize?: number;
+    aspectRatio?: ProductAspectRatio;
     productScale?: number;
     productOffsetX?: number;
     productOffsetY?: number;
@@ -193,19 +209,22 @@ function cropTransparentCanvas(canvas: HTMLCanvasElement, data: Uint8ClampedArra
 
 export async function composeProductAd(options: ComposeOptions) {
     const size = options.outputSize || 2048;
+    const [width, height] = productAspectDimensions(options.aspectRatio || "square", size);
     const canvas = document.createElement("canvas");
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("无法创建合成画布");
 
     const product = await loadImage(options.product.dataUrl);
     const background = options.background ? await loadImage(options.background) : null;
     context.fillStyle = options.neutralColor;
-    context.fillRect(0, 0, size, size);
+    context.fillRect(0, 0, width, height);
 
-    const common = { context, canvas, product, background, options, size };
+    const common = { context, canvas, product, background, options, size: Math.min(width, height), width, height };
     if (options.template === "hero-split") drawHeroSplit(common);
+    if (options.template === "beauty-ribbon") drawBeautyRibbon(common);
+    if (options.template === "soft-story") drawSoftStory(common);
     if (options.template === "selling-detail") drawSellingDetail(common);
     if (options.template === "info-panel") drawInfoPanel(common);
     if (options.template === "scene") drawScene(common);
@@ -215,8 +234,22 @@ export async function composeProductAd(options: ComposeOptions) {
     return canvas.toDataURL("image/png");
 }
 
+export function productAspectDimensions(aspectRatio: ProductAspectRatio, maxSize: number) {
+    if (aspectRatio === "portrait") return [Math.round(maxSize * 0.75), maxSize] as const;
+    if (aspectRatio === "landscape") return [maxSize, Math.round(maxSize / 2.44)] as const;
+    return [maxSize, maxSize] as const;
+}
+
+export function productAspectLabel(aspectRatio: ProductAspectRatio) {
+    if (aspectRatio === "portrait") return "3:4";
+    if (aspectRatio === "landscape") return "1464:600";
+    return "1:1";
+}
+
 export function templateRatioLabel(template: ProductTemplateId) {
     if (template === "hero-split") return "38 / 24 / 38";
+    if (template === "beauty-ribbon") return "竖版静物";
+    if (template === "soft-story") return "A+ 横幅";
     if (template === "selling-detail") return "64 / 36";
     if (template === "info-panel") return "72 / 28";
     if (template === "asymmetric") return "40 / 60";
@@ -230,6 +263,8 @@ type DrawContext = {
     background: LoadedImage | null;
     options: ComposeOptions;
     size: number;
+    width: number;
+    height: number;
 };
 
 function drawHeroSplit(value: DrawContext) {
@@ -245,11 +280,108 @@ function drawHeroSplit(value: DrawContext) {
     }
     context.fillStyle = options.neutralColor;
     context.fillRect(leftWidth, 0, centerWidth, size);
-    drawProduct(context, product, size * 0.025, size * 0.15, size * 0.35, size * 0.68, options);
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, leftWidth, size);
+    context.clip();
+    drawProduct(context, product, size * 0.01, size * 0.13, size * 0.37, size * 0.72, { ...options, productScale: Math.max(1.24, options.productScale || 1) });
+    context.restore();
     drawDetail(context, product, leftWidth + centerWidth, 0, leftWidth, size, options);
     drawPlainRibbon(context, 0, size * 0.89, leftWidth, size * 0.035, options.accentColor, -0.08);
     drawPlainRibbon(context, leftWidth + centerWidth, size * 0.9, leftWidth, size * 0.035, options.accentColor, 0.07);
     drawVerticalCopy(context, leftWidth, centerWidth, size, options);
+}
+
+function drawBeautyRibbon(value: DrawContext) {
+    const { context, product, background, options, width, height } = value;
+    if (background) drawCover(context, background, 0, 0, width, height, 0.5, 0.55);
+    else {
+        const wall = context.createLinearGradient(0, 0, 0, height);
+        wall.addColorStop(0, "#f7f5f2");
+        wall.addColorStop(0.72, "#ece9e4");
+        wall.addColorStop(0.73, "#595654");
+        wall.addColorStop(1, "#171515");
+        context.fillStyle = wall;
+        context.fillRect(0, 0, width, height);
+    }
+
+    const haze = context.createLinearGradient(0, 0, 0, height * 0.62);
+    haze.addColorStop(0, "rgba(255,255,255,.8)");
+    haze.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = haze;
+    context.fillRect(0, 0, width, height * 0.64);
+    drawSilkRibbon(context, width, height, options.primaryColor);
+    drawMarbleCounter(context, width, height);
+
+    context.save();
+    context.translate(width * 0.5, height * 0.16);
+    context.rotate(-0.12);
+    context.textAlign = "center";
+    context.textBaseline = "top";
+    const headlineSize = fitFontSize(context, options.headline, width * 0.88, width * 0.072, width * 0.041, "serif");
+    context.font = `500 ${headlineSize}px Georgia, "Times New Roman", serif`;
+    context.fillStyle = options.primaryColor;
+    context.fillText(options.headline.toUpperCase(), 0, 0, width * 0.9);
+    context.font = `500 ${Math.max(width * 0.025, headlineSize * 0.47)}px Georgia, "Times New Roman", serif`;
+    context.fillStyle = options.darkColor;
+    wrapText(context, options.supportingLine, 0, headlineSize * 1.18, width * 0.72, headlineSize * 0.53, 2);
+    context.restore();
+
+    drawProduct(context, product, width * 0.16, height * 0.34, width * 0.68, height * 0.58, { ...options, productOffsetY: 0 });
+    context.fillStyle = "rgba(255,255,255,.22)";
+    context.fillRect(0, height * 0.91, width, Math.max(2, height * 0.004));
+}
+
+function drawSoftStory(value: DrawContext) {
+    const { context, product, background, options, width, height } = value;
+    if (background) drawCover(context, background, 0, 0, width, height, 0.5, 0.48);
+    else {
+        const room = context.createLinearGradient(0, 0, width, height);
+        room.addColorStop(0, "#f4eee5");
+        room.addColorStop(0.55, "#dcc9b4");
+        room.addColorStop(1, "#ad8969");
+        context.fillStyle = room;
+        context.fillRect(0, 0, width, height);
+    }
+
+    const editorialWash = context.createLinearGradient(0, 0, width * 0.62, 0);
+    editorialWash.addColorStop(0, "rgba(251,247,240,.96)");
+    editorialWash.addColorStop(0.62, "rgba(251,247,240,.68)");
+    editorialWash.addColorStop(1, "rgba(251,247,240,0)");
+    context.fillStyle = editorialWash;
+    context.fillRect(0, 0, width * 0.68, height);
+
+    const insetX = width * 0.038;
+    const insetY = height * 0.5;
+    const insetWidth = width * 0.47;
+    const insetHeight = height * 0.43;
+    context.save();
+    roundedRect(context, insetX, insetY, insetWidth, insetHeight, height * 0.055);
+    context.clip();
+    context.fillStyle = "rgba(248,244,237,.92)";
+    context.fillRect(insetX, insetY, insetWidth, insetHeight);
+    if (background) drawCover(context, background, insetX, insetY, insetWidth, insetHeight, 0.2, 0.72);
+    drawProduct(context, product, insetX + insetWidth * 0.08, insetY + insetHeight * 0.05, insetWidth * 0.84, insetHeight * 0.88, { ...options, productScale: 1.12, productOffsetX: 0, productOffsetY: 0.04 });
+    context.restore();
+
+    context.textAlign = "left";
+    context.textBaseline = "top";
+    const headlineSize = fitFontSize(context, options.headline, width * 0.54, height * 0.105, height * 0.064);
+    context.font = `600 ${headlineSize}px "Trebuchet MS", Arial, sans-serif`;
+    context.fillStyle = options.primaryColor;
+    wrapText(context, titleCase(options.headline), width * 0.05, height * 0.12, width * 0.53, headlineSize * 1.02, 2);
+    context.font = `400 ${Math.max(22, height * 0.047)}px "Trebuchet MS", Arial, sans-serif`;
+    context.fillStyle = options.darkColor;
+    wrapText(context, options.supportingLine, width * 0.05, height * 0.31, width * 0.48, height * 0.058, 3);
+
+    drawProduct(context, product, width * 0.59, height * 0.28, width * 0.34, height * 0.64, { ...options, productScale: 1.1, productOffsetX: 0, productOffsetY: 0.02 });
+
+    context.save();
+    context.strokeStyle = "rgba(255,255,255,.92)";
+    context.lineWidth = Math.max(2, height * 0.006);
+    roundedRect(context, height * 0.03, height * 0.03, width - height * 0.06, height - height * 0.06, height * 0.04);
+    context.stroke();
+    context.restore();
 }
 
 function drawSellingDetail(value: DrawContext) {
@@ -391,10 +523,10 @@ function wrapText(context: CanvasRenderingContext2D, text: string, x: number, y:
     lines.slice(0, maxLines).forEach((value, index) => context.fillText(value, x, y + index * lineHeight, maxWidth));
 }
 
-function fitFontSize(context: CanvasRenderingContext2D, text: string, maxWidth: number, preferred: number, minimum: number) {
+function fitFontSize(context: CanvasRenderingContext2D, text: string, maxWidth: number, preferred: number, minimum: number, family = "Arial Narrow, Arial, sans-serif") {
     let size = preferred;
     while (size > minimum) {
-        context.font = `800 ${size}px Arial Narrow, Arial, sans-serif`;
+        context.font = `800 ${size}px ${family}`;
         if (context.measureText(text.toUpperCase()).width <= maxWidth) return size;
         size -= 2;
     }
@@ -418,6 +550,85 @@ function drawPlainRibbon(context: CanvasRenderingContext2D, x: number, y: number
     context.globalAlpha = 0.94;
     context.fillRect(-width * 0.56, -height / 2, width * 1.12, height);
     context.restore();
+}
+
+function drawSilkRibbon(context: CanvasRenderingContext2D, width: number, height: number, color: string) {
+    context.save();
+    context.shadowColor = "rgba(54,0,5,.42)";
+    context.shadowBlur = height * 0.018;
+    context.shadowOffsetY = height * 0.01;
+    const silk = context.createLinearGradient(0, height * 0.25, 0, height * 0.55);
+    silk.addColorStop(0, shadeColor(color, -38));
+    silk.addColorStop(0.34, shadeColor(color, 20));
+    silk.addColorStop(0.58, shadeColor(color, -10));
+    silk.addColorStop(1, shadeColor(color, -48));
+    context.fillStyle = silk;
+    context.beginPath();
+    context.moveTo(-width * 0.12, height * 0.45);
+    context.bezierCurveTo(width * 0.12, height * 0.31, width * 0.3, height * 0.5, width * 0.52, height * 0.38);
+    context.bezierCurveTo(width * 0.73, height * 0.25, width * 0.9, height * 0.32, width * 1.12, height * 0.16);
+    context.lineTo(width * 1.12, height * 0.29);
+    context.bezierCurveTo(width * 0.91, height * 0.43, width * 0.73, height * 0.38, width * 0.55, height * 0.51);
+    context.bezierCurveTo(width * 0.31, height * 0.63, width * 0.1, height * 0.46, -width * 0.12, height * 0.59);
+    context.closePath();
+    context.fill();
+    context.shadowColor = "transparent";
+    context.strokeStyle = "rgba(255,255,255,.28)";
+    context.lineWidth = Math.max(2, height * 0.006);
+    context.beginPath();
+    context.moveTo(-width * 0.05, height * 0.475);
+    context.bezierCurveTo(width * 0.18, height * 0.36, width * 0.32, height * 0.54, width * 0.54, height * 0.42);
+    context.bezierCurveTo(width * 0.75, height * 0.29, width * 0.9, height * 0.36, width * 1.05, height * 0.24);
+    context.stroke();
+    context.restore();
+}
+
+function drawMarbleCounter(context: CanvasRenderingContext2D, width: number, height: number) {
+    const top = height * 0.73;
+    const marble = context.createLinearGradient(0, top, 0, height);
+    marble.addColorStop(0, "rgba(63,61,60,.82)");
+    marble.addColorStop(0.15, "rgba(38,35,35,.92)");
+    marble.addColorStop(1, "rgba(13,12,13,.98)");
+    context.fillStyle = marble;
+    context.fillRect(0, top, width, height - top);
+    context.save();
+    context.strokeStyle = "rgba(255,255,255,.26)";
+    context.lineWidth = Math.max(2, width * 0.003);
+    for (let index = 0; index < 5; index += 1) {
+        const y = top + (height - top) * (0.14 + index * 0.17);
+        context.beginPath();
+        context.moveTo(-width * 0.08, y);
+        context.bezierCurveTo(width * 0.18, y - height * 0.035, width * 0.42, y + height * 0.024, width * 0.65, y - height * 0.018);
+        context.bezierCurveTo(width * 0.82, y - height * 0.05, width * 0.94, y + height * 0.02, width * 1.08, y - height * 0.028);
+        context.stroke();
+    }
+    context.restore();
+}
+
+function roundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.arcTo(x + width, y, x + width, y + height, r);
+    context.arcTo(x + width, y + height, x, y + height, r);
+    context.arcTo(x, y + height, x, y, r);
+    context.arcTo(x, y, x + width, y, r);
+    context.closePath();
+}
+
+function shadeColor(hex: string, amount: number) {
+    const value = hex.replace("#", "");
+    if (!/^[0-9a-f]{6}$/i.test(value)) return hex;
+    const channels = [0, 2, 4].map((offset) => Math.max(0, Math.min(255, parseInt(value.slice(offset, offset + 2), 16) + amount)));
+    return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function titleCase(value: string) {
+    return value
+        .toLowerCase()
+        .split(/\s+/)
+        .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
+        .join(" ");
 }
 
 function fillScenePlaceholder(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, color: string) {

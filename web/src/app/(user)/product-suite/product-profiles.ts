@@ -1,4 +1,4 @@
-import type { ProductTemplateId } from "./product-compositor";
+import type { ProductAspectRatio, ProductTemplateId } from "./product-compositor";
 
 export type ProductCategoryId = "mechanical" | "electronics" | "home" | "beauty" | "fashion" | "food" | "toy" | "jewelry" | "general";
 
@@ -18,6 +18,7 @@ export type SuiteFrame = {
     type: "卖点图" | "场景图" | "白底图";
     task: string;
     template: ProductTemplateId;
+    aspectRatio: ProductAspectRatio;
     headline: string;
     supportingLine: string;
     sceneDescription: string;
@@ -45,7 +46,9 @@ export type CategoryPreset = {
         type: SuiteFrame["type"];
         task: string;
         template: ProductTemplateId;
+        aspectRatio?: ProductAspectRatio;
         headline: string;
+        supportingLine?: string;
         scene: string;
         productScale: number;
         productOffsetX?: number;
@@ -69,7 +72,8 @@ export const categoryPresets: CategoryPreset[] = [
                 type: "卖点图",
                 task: "最强购买理由",
                 template: "hero-split",
-                headline: "BUILT FOR THE OUTDOORS",
+                headline: "{PRODUCT}",
+                supportingLine: "RUGGED CONSTRUCTION | VISIBLE FUNCTIONAL DETAILS | READY FOR REAL USE",
                 scene: "empty rugged outdoor trail with a clear dirt contact plane and warm directional sunlight",
                 productScale: 1.12,
                 productOffsetY: 0.1,
@@ -158,9 +162,11 @@ export const categoryPresets: CategoryPreset[] = [
             {
                 type: "卖点图",
                 task: "品牌与质感",
-                template: "info-panel",
-                headline: "LUXURY IN EVERY DETAIL",
-                scene: "empty luxury beauty still-life set with polished stone, soft sculptural fabric and quiet upper-left space",
+                template: "beauty-ribbon",
+                aspectRatio: "portrait",
+                headline: "LUXURY WEIGHT DESIGN",
+                supportingLine: "Crafted with substantial packaging for stability and precision.",
+                scene: "empty portrait luxury beauty still-life with an ivory wall and a polished dark marble counter across the lower quarter",
                 productScale: 1.12,
                 productOffsetY: 0.12,
                 detailFocusX: 0.5,
@@ -228,9 +234,11 @@ export const categoryPresets: CategoryPreset[] = [
             {
                 type: "卖点图",
                 task: "触感与情绪价值",
-                template: "asymmetric",
-                headline: "CLOUD-SOFT COMFORT",
-                scene: "empty warm bedroom with broad soft negative space, linen textures and gentle window light",
+                template: "soft-story",
+                aspectRatio: "landscape",
+                headline: "YOUR CUDDLE BUDDY AWAITS",
+                supportingLine: "Ergonomically designed in a prone position, an ideal companion for hugs and naps.",
+                scene: "empty panoramic warm bedroom with ivory bedding, linen textures, gentle window light and clear product placement areas",
                 productScale: 1.1,
                 productOffsetY: 0.15,
                 detailFocusX: 0.55,
@@ -310,7 +318,7 @@ export function buildSuiteFrames(profile: ProductProfile): SuiteFrame[] {
     const preset = categoryPreset(profile.category);
     const points = normalizeSellingPoints(profile.sellingPoints, preset.defaultSellingPoints);
     return preset.frames.map((frame, index) => {
-        const headline = index === 0 && profile.name.trim() && profile.name !== "PRODUCT NAME" ? profile.name.trim().toUpperCase() : frame.headline || points[Math.min(index, points.length - 1)];
+        const headline = frame.headline === "{PRODUCT}" ? profile.name.trim().toUpperCase() || points[0] : frame.headline || points[Math.min(index, points.length - 1)];
         const supportingLine = frame.type === "白底图" ? "" : points[Math.min(index, points.length - 1)] || preset.defaultSellingPoints[Math.min(index, preset.defaultSellingPoints.length - 1)];
         return {
             id: `frame-${index + 1}`,
@@ -318,8 +326,9 @@ export function buildSuiteFrames(profile: ProductProfile): SuiteFrame[] {
             type: frame.type,
             task: frame.task,
             template: frame.template,
+            aspectRatio: frame.aspectRatio || "square",
             headline,
-            supportingLine,
+            supportingLine: frame.supportingLine || supportingLine,
             sceneDescription: [
                 frame.scene,
                 preset.visualDirection,
