@@ -25,6 +25,7 @@ func New() *gin.Engine {
 	api.GET("/storage/config", gin.WrapF(handler.StorageConfig))
 	api.GET("/gotocc/models", gin.WrapF(handler.GotoccModels))
 	api.POST("/gotocc/images/generations", gin.WrapF(handler.GotoccImageGenerations))
+	api.POST("/gotocc/images/edits", gin.WrapF(handler.GotoccImageEdits))
 	api.GET("/media/references/:id", func(c *gin.Context) {
 		handler.ReferenceMedia(c.Writer, c.Request, c.Param("id"))
 	})

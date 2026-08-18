@@ -76,6 +76,42 @@ export async function generateGotoccBackground(connection: GotoccConnection, pro
     return imageToDataUrl({ dataUrl: value });
 }
 
+export async function generateGotoccProductImage(connection: GotoccConnection, images: File[], prompt: string, size: string) {
+    if (!images.length || images.length > 4) throw new Error("请上传 1 至 4 张商品图片");
+    const form = new FormData();
+    form.set("model", connection.model);
+    form.set("prompt", prompt);
+    form.set("size", size);
+    form.set("quality", "medium");
+    images.forEach((image) => form.append("image", image, image.name || "product.png"));
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 180_000);
+    try {
+        const response = await fetch("/api/gotocc/images/edits", {
+            method: "POST",
+            headers: { "X-Gotocc-API-Key": connection.apiKey },
+            body: form,
+            signal: controller.signal,
+        });
+        const payload = (await response.json().catch(() => null)) as {
+            data?: Array<{ url?: string; b64_json?: string }>;
+            error?: { message?: string };
+            msg?: string;
+        } | null;
+        if (!response.ok) throw new Error(payload?.error?.message || payload?.msg || "商品图生成失败");
+        const item = payload?.data?.[0];
+        const value = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : item?.url || "";
+        if (!value) throw new Error("gotocc 没有返回商品图");
+        return imageToDataUrl({ dataUrl: value });
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw new Error("生成超时，请重试");
+        throw error;
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
+
 function validGotoccKey(value: string) {
     return value.startsWith("sk-") && value.length >= 16 && value.length <= 256 && !/\s/.test(value);
 }

@@ -5,15 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"strconv"
 	"strings"
 
 	"github.com/tigerowo/infinite-canvas/service"
 )
 
 const (
-	gotoccKeyHeader = "X-Gotocc-API-Key"
-	gotoccBodyLimit = 1 << 20
+	gotoccKeyHeader          = "X-Gotocc-API-Key"
+	gotoccBodyLimit          = 1 << 20
+	gotoccEditBodyLimit      = 64 << 20
+	gotoccEditImageLimit     = 15 << 20
+	gotoccEditMaxImageCount  = 4
+	gotoccEditPromptMaxChars = 12000
 )
 
 var (
@@ -22,7 +29,7 @@ var (
 )
 
 func GotoccModels(w http.ResponseWriter, r *http.Request) {
-	proxyGotoccRequest(w, r, http.MethodGet, "/models", nil)
+	proxyGotoccRequest(w, r, http.MethodGet, "/models", nil, "")
 }
 
 func GotoccImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -36,10 +43,24 @@ func GotoccImageGenerations(w http.ResponseWriter, r *http.Request) {
 		FailWithStatus(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	proxyGotoccRequest(w, r, http.MethodPost, "/images/generations", body)
+	proxyGotoccRequest(w, r, http.MethodPost, "/images/generations", body, "application/json")
 }
 
-func proxyGotoccRequest(w http.ResponseWriter, r *http.Request, method string, path string, body []byte) {
+func GotoccImageEdits(w http.ResponseWriter, r *http.Request) {
+	if !validGotoccKey(strings.TrimSpace(r.Header.Get(gotoccKeyHeader))) {
+		FailWithStatus(w, http.StatusUnauthorized, "gotocc Key 无效")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, gotoccEditBodyLimit)
+	body, contentType, err := buildGotoccEditRequest(r)
+	if err != nil {
+		FailWithStatus(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	proxyGotoccRequest(w, r, http.MethodPost, "/images/edits", body, contentType)
+}
+
+func proxyGotoccRequest(w http.ResponseWriter, r *http.Request, method string, path string, body []byte, contentType string) {
 	key := strings.TrimSpace(r.Header.Get(gotoccKeyHeader))
 	if !validGotoccKey(key) {
 		FailWithStatus(w, http.StatusUnauthorized, "gotocc Key 无效")
@@ -52,8 +73,8 @@ func proxyGotoccRequest(w http.ResponseWriter, r *http.Request, method string, p
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+key)
-	if len(body) > 0 {
-		request.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
 	}
 
 	response, err := gotoccHTTPClient.Do(request)
@@ -67,6 +88,116 @@ func proxyGotoccRequest(w http.ResponseWriter, r *http.Request, method string, p
 	w.Header().Set("Content-Type", firstNonEmpty(response.Header.Get("Content-Type"), "application/json"))
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
+}
+
+func buildGotoccEditRequest(r *http.Request) ([]byte, string, error) {
+	if err := r.ParseMultipartForm(gotoccEditBodyLimit); err != nil {
+		return nil, "", errors.New("商品图片过大或上传格式错误")
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+
+	modelName := strings.TrimSpace(r.FormValue("model"))
+	if modelName != "gpt-image-2" && modelName != "gpt-image-2-high" {
+		return nil, "", errors.New("gotocc 连接仅允许 GPT Image 2")
+	}
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	if prompt == "" || len([]rune(prompt)) > gotoccEditPromptMaxChars {
+		return nil, "", errors.New("商品图描述不能为空且不能超过 12000 字符")
+	}
+	size := strings.TrimSpace(r.FormValue("size"))
+	switch size {
+	case "1024x1024", "1536x1024", "1024x1536":
+	default:
+		return nil, "", errors.New("商品图画幅不支持")
+	}
+	quality := strings.TrimSpace(r.FormValue("quality"))
+	if quality == "" {
+		quality = "medium"
+	}
+	if quality != "medium" && quality != "high" {
+		return nil, "", errors.New("商品图质量参数不支持")
+	}
+
+	headers := append([]*multipart.FileHeader{}, r.MultipartForm.File["image"]...)
+	headers = append(headers, r.MultipartForm.File["image[]"]...)
+	if len(headers) == 0 || len(headers) > gotoccEditMaxImageCount {
+		return nil, "", errors.New("请上传 1 至 4 张商品图片")
+	}
+
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	fields := map[string]string{
+		"model":           modelName,
+		"prompt":          prompt,
+		"n":               "1",
+		"size":            size,
+		"quality":         quality,
+		"response_format": "b64_json",
+	}
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return nil, "", errors.New("无法准备商品图请求")
+		}
+	}
+	for index, header := range headers {
+		file, err := header.Open()
+		if err != nil {
+			return nil, "", errors.New("无法读取商品图片")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, gotoccEditImageLimit+1))
+		_ = file.Close()
+		if readErr != nil || len(data) == 0 {
+			return nil, "", errors.New("无法读取商品图片")
+		}
+		if len(data) > gotoccEditImageLimit {
+			return nil, "", errors.New("单张商品图片不能超过 15 MB")
+		}
+		mimeType := normalizeGotoccImageType(data)
+		if mimeType == "" {
+			return nil, "", errors.New("商品图片仅支持 JPEG、PNG 或 WebP")
+		}
+		filename := "product-" + strconv.Itoa(index+1) + gotoccImageExtension(mimeType)
+		partHeader := make(textproto.MIMEHeader)
+		partHeader.Set("Content-Disposition", `form-data; name="image"; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+		partHeader.Set("Content-Type", mimeType)
+		part, err := writer.CreatePart(partHeader)
+		if err != nil {
+			return nil, "", errors.New("无法准备商品图请求")
+		}
+		if _, err := part.Write(data); err != nil {
+			return nil, "", errors.New("无法准备商品图请求")
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", errors.New("无法准备商品图请求")
+	}
+	return buffer.Bytes(), writer.FormDataContentType(), nil
+}
+
+func normalizeGotoccImageType(data []byte) string {
+	switch http.DetectContentType(data) {
+	case "image/jpeg":
+		return "image/jpeg"
+	case "image/png":
+		return "image/png"
+	case "image/webp":
+		return "image/webp"
+	default:
+		return ""
+	}
+}
+
+func gotoccImageExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func validGotoccKey(value string) bool {
@@ -84,7 +215,7 @@ func validateGotoccImageRequest(body []byte) error {
 		return errors.New("gotocc 连接仅允许 GPT Image 2")
 	}
 	prompt := strings.TrimSpace(toStringSafe(payload["prompt"]))
-	if prompt == "" || len(prompt) > 12000 {
+	if prompt == "" || len([]rune(prompt)) > gotoccEditPromptMaxChars {
 		return errors.New("背景描述不能为空且不能超过 12000 字符")
 	}
 	if containsGotoccMedia(payload) {

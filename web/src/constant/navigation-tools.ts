@@ -13,7 +13,7 @@ export const navigationTools = [
     },
     {
         slug: "product-suite",
-        label: "商品套图",
+        label: "商品效果图",
         icon: PackageCheck,
     },
     {

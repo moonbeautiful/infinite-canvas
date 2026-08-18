@@ -2,7 +2,7 @@
 
 import { App, Button, Input, Modal, Segmented, Select, Slider, Tag } from "antd";
 import { zipSync } from "fflate";
-import { Check, Download, ExternalLink, FilePlus2, ImagePlus, KeyRound, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Upload, WandSparkles } from "lucide-react";
+import { ArrowLeft, Check, Download, ExternalLink, FilePlus2, ImagePlus, KeyRound, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Upload, WandSparkles } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useEffect, useMemo, useState } from "react";
 
@@ -13,8 +13,14 @@ import { composeProductAd, extractProductFromWhiteBackground, extractProductWith
 import { analyzeProductFacts, buildQualityReport, inferProductCategory, repairFrame, type ProductFacts } from "./product-analysis";
 import { buildSuiteFrames, categoryPreset, categoryPresets, createDefaultProfile, profileFromUnknown, type ProductCategoryId, type ProductProfile, type SuiteFrame } from "./product-profiles";
 import { clearProductSuiteDraft, loadProductSuiteDraft, saveProductSuiteDraft, type ProductInputImage } from "./product-suite-storage";
+import { SimpleProductStudio } from "./simple-product-studio";
 
 export default function ProductSuitePage() {
+    const [advanced, setAdvanced] = useState(false);
+    return advanced ? <AdvancedProductSuitePage onExitSimple={() => setAdvanced(false)} /> : <SimpleProductStudio onOpenAdvanced={() => setAdvanced(true)} />;
+}
+
+function AdvancedProductSuitePage({ onExitSimple }: { onExitSimple: () => void }) {
     const { message, modal } = App.useApp();
 
     const [profile, setProfile] = useState<ProductProfile>(() => createDefaultProfile());
@@ -138,26 +144,7 @@ export default function ProductSuitePage() {
                 .catch(() => setSaveStatus("error"));
         }, 900);
         return () => window.clearTimeout(timer);
-    }, [
-        accentColor,
-        activeFrameIndex,
-        backgrounds,
-        darkColor,
-        draftReady,
-        edgeCutoff,
-        extractionMode,
-        feather,
-        frameOverrides,
-        neutralColor,
-        noText,
-        primaryColor,
-        productCutout,
-        productImages,
-        productSource,
-        profile,
-        styleReference,
-        tolerance,
-    ]);
+    }, [accentColor, activeFrameIndex, backgrounds, darkColor, draftReady, edgeCutoff, extractionMode, feather, frameOverrides, neutralColor, noText, primaryColor, productCutout, productImages, productSource, profile, styleReference, tolerance]);
 
     useEffect(() => {
         const saved = loadGotoccConnection();
@@ -249,7 +236,9 @@ export default function ProductSuitePage() {
     };
 
     const handleProductFiles = async (fileList?: FileList | File[]) => {
-        const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/")).slice(0, 5);
+        const files = Array.from(fileList || [])
+            .filter((file) => file.type.startsWith("image/"))
+            .slice(0, 5);
         if (!files.length) return;
         const images = await Promise.all(
             files.map(async (file, index) => ({
@@ -552,9 +541,10 @@ export default function ProductSuitePage() {
                     <Tag color="green">像素锁</Tag>
                 </div>
                 <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
-                    <span className={`hidden text-xs sm:inline ${saveStatus === "error" ? "text-red-500" : "text-stone-500"}`}>
-                        {saveStatus === "saving" ? "保存中" : saveStatus === "saved" ? "已自动保存" : saveStatus === "error" ? "保存失败" : ""}
-                    </span>
+                    <Button icon={<ArrowLeft className="size-4" />} onClick={onExitSimple}>
+                        简易模式
+                    </Button>
+                    <span className={`hidden text-xs sm:inline ${saveStatus === "error" ? "text-red-500" : "text-stone-500"}`}>{saveStatus === "saving" ? "保存中" : saveStatus === "saved" ? "已自动保存" : saveStatus === "error" ? "保存失败" : ""}</span>
                     <Button aria-label="新建商品套图" title="新建商品套图" icon={<FilePlus2 className="size-4" />} onClick={createNewProject} />
                     <span className="hidden sm:inline-flex">
                         <Tag>GPT Image 2</Tag>
@@ -956,21 +946,7 @@ function ControlSection({ title, children }: { title: string; children: React.Re
     );
 }
 
-function UploadControl({
-    label,
-    icon,
-    preview,
-    multiple = false,
-    onFile,
-    onFiles,
-}: {
-    label: string;
-    icon: React.ReactNode;
-    preview: string;
-    multiple?: boolean;
-    onFile?: (file?: File) => void;
-    onFiles?: (files?: FileList) => void;
-}) {
+function UploadControl({ label, icon, preview, multiple = false, onFile, onFiles }: { label: string; icon: React.ReactNode; preview: string; multiple?: boolean; onFile?: (file?: File) => void; onFiles?: (files?: FileList) => void }) {
     return (
         <label className="relative flex h-24 cursor-pointer items-center justify-center overflow-hidden border border-stone-200 transition hover:border-stone-400 dark:border-stone-800 dark:hover:border-stone-600">
             {preview ? (
