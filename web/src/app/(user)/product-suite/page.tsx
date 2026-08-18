@@ -2,7 +2,7 @@
 
 import { App, Button, Input, Modal, Segmented, Select, Slider, Tag } from "antd";
 import { zipSync } from "fflate";
-import { Check, Download, ExternalLink, ImagePlus, KeyRound, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Upload, WandSparkles } from "lucide-react";
+import { Check, Download, ExternalLink, FilePlus2, ImagePlus, KeyRound, LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Upload, WandSparkles } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useEffect, useMemo, useState } from "react";
 
@@ -11,18 +11,21 @@ import { clearGotoccConnection, generateGotoccBackground, loadGotoccConnection, 
 
 import { composeProductAd, extractProductFromWhiteBackground, extractProductWithAi, productAspectDimensions, productAspectLabel, productTemplates, templateRatioLabel, type ProductCutout } from "./product-compositor";
 import { analyzeProductFacts, buildQualityReport, inferProductCategory, repairFrame, type ProductFacts } from "./product-analysis";
-import { buildSuiteFrames, categoryPreset, categoryPresets, createDefaultProfile, type ProductCategoryId, type ProductProfile, type SuiteFrame } from "./product-profiles";
+import { buildSuiteFrames, categoryPreset, categoryPresets, createDefaultProfile, profileFromUnknown, type ProductCategoryId, type ProductProfile, type SuiteFrame } from "./product-profiles";
+import { clearProductSuiteDraft, loadProductSuiteDraft, saveProductSuiteDraft, type ProductInputImage } from "./product-suite-storage";
 
 export default function ProductSuitePage() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
 
     const [profile, setProfile] = useState<ProductProfile>(() => createDefaultProfile());
     const [activeFrameIndex, setActiveFrameIndex] = useState(0);
     const [frameOverrides, setFrameOverrides] = useState<Partial<Record<string, Partial<SuiteFrame>>>>({});
+    const [productImages, setProductImages] = useState<ProductInputImage[]>([]);
     const [productSource, setProductSource] = useState("");
     const [productCutout, setProductCutout] = useState<ProductCutout | null>(null);
     const [styleReference, setStyleReference] = useState("");
     const [backgrounds, setBackgrounds] = useState<Partial<Record<string, string>>>({});
+    const [noText, setNoText] = useState(false);
     const [preview, setPreview] = useState("");
     const [extracting, setExtracting] = useState(false);
     const [extractionMode, setExtractionMode] = useState<"ai" | "white">("ai");
@@ -45,15 +48,116 @@ export default function ProductSuitePage() {
     const [connectionOpen, setConnectionOpen] = useState(false);
     const [connectionKey, setConnectionKey] = useState("");
     const [connecting, setConnecting] = useState(false);
+    const [draftReady, setDraftReady] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
     const suiteFrames = useMemo(() => buildSuiteFrames(profile).map((frame) => ({ ...frame, ...frameOverrides[frame.id] })), [frameOverrides, profile]);
     const activeFrame = suiteFrames[activeFrameIndex] || suiteFrames[0];
     const background = backgrounds[activeFrame.id];
     const preparedBackgrounds = suiteFrames.filter((frame) => frame.template === "catalog" || backgrounds[frame.id]).length;
     const qualityReport = useMemo(
-        () => buildQualityReport({ frame: activeFrame, cutout: productCutout, facts: productFacts, sourceHash, background }),
-        [activeFrame, background, productCutout, productFacts, sourceHash],
+        () => buildQualityReport({ frame: activeFrame, cutout: productCutout, facts: productFacts, sourceHash, referenceCount: productImages.length, noText, background }),
+        [activeFrame, background, noText, productCutout, productFacts, productImages.length, sourceHash],
     );
+    const suiteQualityReports = useMemo(
+        () =>
+            suiteFrames.map((frame) =>
+                buildQualityReport({
+                    frame,
+                    cutout: productCutout,
+                    facts: productFacts,
+                    sourceHash,
+                    referenceCount: productImages.length,
+                    noText,
+                    background: backgrounds[frame.id],
+                }),
+            ),
+        [backgrounds, noText, productCutout, productFacts, productImages.length, sourceHash, suiteFrames],
+    );
+    const suiteQualityScore = productCutout ? Math.round(suiteQualityReports.reduce((total, report) => total + report.score, 0) / Math.max(1, suiteQualityReports.length)) : 0;
+    const problemFrameIndexes = suiteQualityReports.flatMap((report, index) => (report.score < 100 ? [index] : []));
+
+    useEffect(() => {
+        let active = true;
+        void loadProductSuiteDraft()
+            .then((draft) => {
+                if (!active || !draft) return;
+                setProfile(profileFromUnknown(draft.profile, createDefaultProfile()));
+                setActiveFrameIndex(Math.max(0, Math.min(5, draft.activeFrameIndex || 0)));
+                setFrameOverrides(draft.frameOverrides || {});
+                setProductImages(draft.productImages || []);
+                setProductSource(draft.productSource || "");
+                setSourceHash(draft.productImages?.find((item) => item.dataUrl === draft.productSource)?.hash || "");
+                setProductCutout(draft.productCutout || null);
+                setStyleReference(draft.styleReference || "");
+                setBackgrounds(draft.backgrounds || {});
+                setNoText(Boolean(draft.noText));
+                setExtractionMode(draft.extractionMode || "ai");
+                setTolerance(draft.tolerance || 30);
+                setFeather(draft.feather || 24);
+                setEdgeCutoff(draft.edgeCutoff || 72);
+                setPrimaryColor(draft.colors?.primary || defaultPalette.primary);
+                setAccentColor(draft.colors?.accent || defaultPalette.accent);
+                setNeutralColor(draft.colors?.neutral || defaultPalette.neutral);
+                setDarkColor(draft.colors?.dark || defaultPalette.dark);
+                setSaveStatus("saved");
+                if (draft.productSource) message.success("已恢复上次商品套图项目");
+            })
+            .catch(() => {
+                if (active) setSaveStatus("error");
+            })
+            .finally(() => {
+                if (active) setDraftReady(true);
+            });
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!draftReady) return;
+        setSaveStatus("saving");
+        const timer = window.setTimeout(() => {
+            void saveProductSuiteDraft({
+                profile,
+                activeFrameIndex,
+                frameOverrides,
+                productImages,
+                productSource,
+                productCutout,
+                styleReference,
+                backgrounds,
+                noText,
+                extractionMode,
+                tolerance,
+                feather,
+                edgeCutoff,
+                colors: { primary: primaryColor, accent: accentColor, neutral: neutralColor, dark: darkColor },
+            })
+                .then(() => setSaveStatus("saved"))
+                .catch(() => setSaveStatus("error"));
+        }, 900);
+        return () => window.clearTimeout(timer);
+    }, [
+        accentColor,
+        activeFrameIndex,
+        backgrounds,
+        darkColor,
+        draftReady,
+        edgeCutoff,
+        extractionMode,
+        feather,
+        frameOverrides,
+        neutralColor,
+        noText,
+        primaryColor,
+        productCutout,
+        productImages,
+        productSource,
+        profile,
+        styleReference,
+        tolerance,
+    ]);
 
     useEffect(() => {
         const saved = loadGotoccConnection();
@@ -128,8 +232,8 @@ export default function ProductSuitePage() {
             product: productCutout,
             background: backgrounds[frame.id],
             template: frame.template,
-            headline: frame.headline,
-            supportingLine: frame.supportingLine,
+            headline: noText ? "" : frame.headline,
+            supportingLine: noText ? "" : frame.supportingLine,
             primaryColor,
             accentColor,
             neutralColor,
@@ -144,16 +248,35 @@ export default function ProductSuitePage() {
         });
     };
 
-    const handleProductFile = async (file?: File) => {
-        if (!file) return;
-        const dataUrl = await readFileAsDataUrl(file);
-        const name = file.name.replace(/\.[^.]+$/, "") || "商品";
-        const inferredCategory = inferProductCategory(file.name);
+    const handleProductFiles = async (fileList?: FileList | File[]) => {
+        const files = Array.from(fileList || []).filter((file) => file.type.startsWith("image/")).slice(0, 5);
+        if (!files.length) return;
+        const images = await Promise.all(
+            files.map(async (file, index) => ({
+                id: `${Date.now()}-${index}`,
+                name: file.name,
+                dataUrl: await readFileAsDataUrl(file),
+                hash: await sha256(file),
+            })),
+        );
+        const primary = images[0];
+        const name = primary.name.replace(/\.[^.]+$/, "") || "商品";
+        const inferredCategory = inferProductCategory(files.map((file) => file.name).join(" "));
         if (inferredCategory) applyCategory(inferredCategory, name);
         else setProfile((value) => ({ ...value, name }));
-        setProductSource(dataUrl);
-        setSourceHash(await sha256(file));
-        await extractProduct(dataUrl);
+        setProductImages(images);
+        setProductSource(primary.dataUrl);
+        setSourceHash(primary.hash);
+        await extractProduct(primary.dataUrl);
+        message.success(`已锁定 ${images.length} 张商品证据图`);
+    };
+
+    const selectPrimaryProductImage = async (image: ProductInputImage) => {
+        if (image.dataUrl === productSource) return;
+        setProductSource(image.dataUrl);
+        setSourceHash(image.hash);
+        await extractProduct(image.dataUrl);
+        message.success("已切换主商品图");
     };
 
     const extractProduct = async (source = productSource, mode = extractionMode) => {
@@ -225,8 +348,10 @@ export default function ProductSuitePage() {
         const [sourceBlob, styleBlob] = await Promise.all([sourceResponse.blob(), styleResponse.blob()]);
         const sourceFile = new File([sourceBlob], `${id}-source.jpg`, { type: sourceBlob.type || "image/jpeg" });
         const sourceDataUrl = await readFileAsDataUrl(sourceFile);
+        const hash = await sha256(sourceFile);
+        setProductImages([{ id: `${id}-source`, name: sourceFile.name, dataUrl: sourceDataUrl, hash }]);
         setProductSource(sourceDataUrl);
-        setSourceHash(await sha256(sourceFile));
+        setSourceHash(hash);
         await extractProduct(sourceDataUrl, "ai");
         await handleStyleFile(new File([styleBlob], `${id}-reference.png`, { type: styleBlob.type || "image/png" }));
         setProfile(demo.profile);
@@ -291,9 +416,49 @@ export default function ProductSuitePage() {
         message.success("已按质检结果校正版式与商品边缘");
     };
 
+    const locateNextProblem = () => {
+        if (!problemFrameIndexes.length) return;
+        const next = problemFrameIndexes.find((index) => index > activeFrameIndex) ?? problemFrameIndexes[0];
+        setActiveFrameIndex(next);
+    };
+
+    const createNewProject = () => {
+        modal.confirm({
+            title: "新建商品套图",
+            content: "当前项目已自动保存；新建后会清空本机草稿。",
+            okText: "新建",
+            cancelText: "取消",
+            onOk: async () => {
+                await clearProductSuiteDraft();
+                const nextProfile = createDefaultProfile();
+                const palette = categoryPreset("general").palette;
+                setProfile(nextProfile);
+                setActiveFrameIndex(0);
+                setFrameOverrides({});
+                setProductImages([]);
+                setProductSource("");
+                setSourceHash("");
+                setProductCutout(null);
+                setProductFacts(null);
+                setStyleReference("");
+                setBackgrounds({});
+                setNoText(false);
+                setPreview("");
+                setPrimaryColor(palette.primary);
+                setAccentColor(palette.accent);
+                setNeutralColor(palette.neutral);
+                setDarkColor(palette.dark);
+                setSaveStatus("saved");
+                message.success("已新建商品套图");
+            },
+        });
+    };
+
     const handleBackgroundFile = async (file?: File) => {
         if (!file) return;
-        setBackgrounds((value) => ({ ...value, [activeFrame.id]: URL.createObjectURL(file) }));
+        setBackgrounds((value) => ({ ...value, [activeFrame.id]: "" }));
+        const dataUrl = await readFileAsDataUrl(file);
+        setBackgrounds((value) => ({ ...value, [activeFrame.id]: dataUrl }));
     };
 
     const requestBackground = async (frame: SuiteFrame, onStatus: (status: string) => void) => {
@@ -386,18 +551,27 @@ export default function ProductSuitePage() {
                     <h1 className="text-base font-semibold">商品套图</h1>
                     <Tag color="green">像素锁</Tag>
                 </div>
-                <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-                    <Tag>GPT Image 2</Tag>
+                <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+                    <span className={`hidden text-xs sm:inline ${saveStatus === "error" ? "text-red-500" : "text-stone-500"}`}>
+                        {saveStatus === "saving" ? "保存中" : saveStatus === "saved" ? "已自动保存" : saveStatus === "error" ? "保存失败" : ""}
+                    </span>
+                    <Button aria-label="新建商品套图" title="新建商品套图" icon={<FilePlus2 className="size-4" />} onClick={createNewProject} />
+                    <span className="hidden sm:inline-flex">
+                        <Tag>GPT Image 2</Tag>
+                    </span>
                     <Button
+                        className="min-w-0 flex-1 sm:flex-none"
                         icon={gotoccStatus === "checking" ? <LoaderCircle className="size-4 animate-spin" /> : gotoccStatus === "connected" ? <ShieldCheck className="size-4" /> : <KeyRound className="size-4" />}
                         type={gotoccStatus === "connected" ? "default" : "primary"}
                         onClick={() => setConnectionOpen(true)}
                     >
                         {gotoccStatus === "connected" ? "gotocc 已连接" : gotoccStatus === "checking" ? "检测连接" : "连接 gotocc 额度"}
                     </Button>
-                    <Button className="hidden sm:inline-flex" aria-label="导出整套 ZIP" title="导出整套 ZIP" icon={<Download className="size-4" />} disabled={!productCutout} onClick={() => void downloadSuite()}>
-                        导出整套 ZIP
-                    </Button>
+                    <span className="hidden sm:inline-flex">
+                        <Button aria-label="导出整套 ZIP" title="导出整套 ZIP" icon={<Download className="size-4" />} disabled={!productCutout} onClick={() => void downloadSuite()}>
+                            导出整套 ZIP
+                        </Button>
+                    </span>
                 </div>
             </header>
 
@@ -405,9 +579,31 @@ export default function ProductSuitePage() {
                 <aside className="min-h-0 min-w-0 overflow-y-auto border-b border-stone-200 px-5 py-5 lg:border-r lg:border-b-0 dark:border-stone-800">
                     <ControlSection title="素材">
                         <div className="grid grid-cols-2 gap-2">
-                            <UploadControl label={productSource ? "更换商品" : "商品原图"} icon={<ImagePlus className="size-4" />} preview={productSource} onFile={(file) => void handleProductFile(file)} />
+                            <UploadControl
+                                label={productImages.length ? `更换商品图 ${productImages.length}/5` : "商品图 1-5 张"}
+                                icon={<ImagePlus className="size-4" />}
+                                preview={productSource}
+                                multiple
+                                onFiles={(files) => void handleProductFiles(files)}
+                            />
                             <UploadControl label={styleReference ? "更换参考" : "风格参考"} icon={<Sparkles className="size-4" />} preview={styleReference} onFile={(file) => void handleStyleFile(file)} />
                         </div>
+                        {productImages.length ? (
+                            <div className="grid grid-cols-5 gap-1">
+                                {productImages.map((image, index) => (
+                                    <button
+                                        key={image.id}
+                                        type="button"
+                                        className={`relative aspect-square overflow-hidden border ${image.dataUrl === productSource ? "border-stone-950 dark:border-stone-100" : "border-stone-200 dark:border-stone-800"}`}
+                                        title={`输入图 ${index + 1}：${image.name}`}
+                                        onClick={() => void selectPrimaryProductImage(image)}
+                                    >
+                                        <img src={image.dataUrl} alt={`输入图 ${index + 1}`} className="size-full object-cover" />
+                                        <span className="absolute bottom-0 left-0 bg-black/70 px-1 text-[10px] text-white">{index + 1}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
                         <div className="grid grid-cols-3 gap-2">
                             {(Object.keys(demos) as DemoId[]).map((id) => (
                                 <Button key={id} size="small" onClick={() => void loadDemo(id)}>
@@ -432,6 +628,7 @@ export default function ProductSuitePage() {
                                 <span>
                                     原图 {productFacts.sourceWidth}×{productFacts.sourceHeight}
                                 </span>
+                                <span>证据 {productImages.length}/5</span>
                                 <span>主体占比 {Math.round(productFacts.coverage * 100)}%</span>
                                 <span>透明层 {productFacts.cutoutHash.slice(0, 8)}</span>
                                 <span className="flex items-center gap-1" aria-label="商品主色">
@@ -460,12 +657,17 @@ export default function ProductSuitePage() {
                                 placeholder={`卖点 ${index + 1}`}
                             />
                         ))}
-                        <Input aria-label="材质事实" value={profile.material} onChange={(event) => setProfile((value) => ({ ...value, material: event.target.value }))} placeholder="材质事实" />
-                        <Input aria-label="目标买家" value={profile.audience} onChange={(event) => setProfile((value) => ({ ...value, audience: event.target.value }))} placeholder="目标买家" />
-                        <div className="grid grid-cols-2 gap-2">
-                            <Input aria-label="目标平台" value={profile.marketplace} onChange={(event) => setProfile((value) => ({ ...value, marketplace: event.target.value }))} placeholder="目标平台" />
-                            <Input aria-label="文案语言" value={profile.language} onChange={(event) => setProfile((value) => ({ ...value, language: event.target.value }))} placeholder="文案语言" />
-                        </div>
+                        <details className="border-t border-stone-200 pt-3 text-xs dark:border-stone-800">
+                            <summary className="cursor-pointer text-stone-500">更多事实与市场</summary>
+                            <div className="mt-3 space-y-2">
+                                <Input aria-label="材质事实" value={profile.material} onChange={(event) => setProfile((value) => ({ ...value, material: event.target.value }))} placeholder="材质事实" />
+                                <Input aria-label="目标买家" value={profile.audience} onChange={(event) => setProfile((value) => ({ ...value, audience: event.target.value }))} placeholder="目标买家" />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <Input aria-label="目标平台" value={profile.marketplace} onChange={(event) => setProfile((value) => ({ ...value, marketplace: event.target.value }))} placeholder="目标平台" />
+                                    <Input aria-label="文案语言" value={profile.language} onChange={(event) => setProfile((value) => ({ ...value, language: event.target.value }))} placeholder="文案语言" />
+                                </div>
+                            </div>
+                        </details>
                     </ControlSection>
 
                     <ControlSection title="白底提取">
@@ -512,6 +714,15 @@ export default function ProductSuitePage() {
                     </ControlSection>
 
                     <ControlSection title={`第 ${activeFrameIndex + 1} 张文案`}>
+                        <Segmented
+                            block
+                            value={noText ? "clean" : "copy"}
+                            options={[
+                                { label: "带文案", value: "copy" },
+                                { label: "无字版", value: "clean" },
+                            ]}
+                            onChange={(value) => setNoText(value === "clean")}
+                        />
                         <Input aria-label="短标题" value={activeFrame.headline} onChange={(event) => updateActiveFrame({ headline: event.target.value })} placeholder="短标题" />
                         <Input.TextArea aria-label="辅助文案" value={activeFrame.supportingLine} onChange={(event) => updateActiveFrame({ supportingLine: event.target.value })} autoSize={{ minRows: 2, maxRows: 3 }} placeholder="辅助文案" />
                     </ControlSection>
@@ -533,7 +744,13 @@ export default function ProductSuitePage() {
                         <LabeledSlider label="细节纵向" value={activeFrame.detailFocusY} min={0} max={1} step={0.01} onChange={(value) => updateActiveFrame({ detailFocusY: value })} />
                     </ControlSection>
 
-                    <ControlSection title={`自动质检 · ${qualityReport.score}`}>
+                    <ControlSection title={`当前图质检 · ${qualityReport.score}`}>
+                        <div className="flex items-center justify-between text-xs">
+                            <span>整套 {suiteQualityScore}</span>
+                            <span className={!productCutout ? "text-stone-500" : problemFrameIndexes.length ? "text-amber-600" : "text-emerald-600"}>
+                                {!productCutout ? "等待商品" : problemFrameIndexes.length ? `${problemFrameIndexes.length} 张待处理` : "6 张通过"}
+                            </span>
+                        </div>
                         <div className="divide-y divide-stone-200 dark:divide-stone-800">
                             {qualityReport.checks.map((item) => (
                                 <div key={item.id} className="flex items-start gap-2 py-2 first:pt-0 last:pb-0" title={item.detail}>
@@ -546,6 +763,9 @@ export default function ProductSuitePage() {
                         <Button block icon={<RefreshCw className="size-4" />} disabled={!qualityReport.canRepair || extracting} onClick={() => void repairActiveFrame()}>
                             一键修复
                         </Button>
+                        <Button block disabled={!productCutout || !problemFrameIndexes.length} onClick={locateNextProblem}>
+                            定位下一问题
+                        </Button>
                     </ControlSection>
                 </aside>
 
@@ -557,7 +777,7 @@ export default function ProductSuitePage() {
                         <Tag>版式 {templateRatioLabel(activeFrame.template)}</Tag>
                         <Tag>画幅 {productAspectLabel(activeFrame.aspectRatio)}</Tag>
                         <Tag color={productCutout ? "green" : "default"}>{productCutout ? "商品像素锁通过" : "等待商品"}</Tag>
-                        <Tag color={qualityReport.score >= 90 ? "green" : qualityReport.score >= 70 ? "gold" : "red"}>质检 {qualityReport.score}</Tag>
+                        <Tag color={suiteQualityScore >= 90 ? "green" : suiteQualityScore >= 70 ? "gold" : "red"}>整套质检 {suiteQualityScore}</Tag>
                         <span className="ml-auto text-xs text-stone-500">背景 {preparedBackgrounds}/6</span>
                     </div>
 
@@ -736,7 +956,21 @@ function ControlSection({ title, children }: { title: string; children: React.Re
     );
 }
 
-function UploadControl({ label, icon, preview, onFile }: { label: string; icon: React.ReactNode; preview: string; onFile: (file?: File) => void }) {
+function UploadControl({
+    label,
+    icon,
+    preview,
+    multiple = false,
+    onFile,
+    onFiles,
+}: {
+    label: string;
+    icon: React.ReactNode;
+    preview: string;
+    multiple?: boolean;
+    onFile?: (file?: File) => void;
+    onFiles?: (files?: FileList) => void;
+}) {
     return (
         <label className="relative flex h-24 cursor-pointer items-center justify-center overflow-hidden border border-stone-200 transition hover:border-stone-400 dark:border-stone-800 dark:hover:border-stone-600">
             {preview ? (
@@ -748,7 +982,18 @@ function UploadControl({ label, icon, preview, onFile }: { label: string; icon: 
                 </span>
             )}
             {preview ? <span className="absolute inset-x-0 bottom-0 bg-black/65 px-2 py-1 text-left text-xs text-white">{label}</span> : null}
-            <input className="absolute inset-0 cursor-pointer opacity-0" type="file" accept="image/*" aria-label={label} onChange={(event) => onFile(event.target.files?.[0])} />
+            <input
+                className="absolute inset-0 cursor-pointer opacity-0"
+                type="file"
+                accept="image/*"
+                multiple={multiple}
+                aria-label={label}
+                onChange={(event) => {
+                    if (multiple) onFiles?.(event.target.files || undefined);
+                    else onFile?.(event.target.files?.[0]);
+                    event.target.value = "";
+                }}
+            />
         </label>
     );
 }

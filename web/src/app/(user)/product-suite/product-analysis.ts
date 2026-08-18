@@ -14,7 +14,7 @@ export type ProductFacts = {
 };
 
 export type QualityCheck = {
-    id: "pixels" | "direction" | "edge" | "background" | "copy" | "layout";
+    id: "references" | "pixels" | "direction" | "edge" | "background" | "copy" | "layout";
     label: string;
     status: "pass" | "warning" | "error";
     detail: string;
@@ -61,14 +61,22 @@ export function buildQualityReport(input: {
     cutout: ProductCutout | null;
     facts: ProductFacts | null;
     sourceHash: string;
+    referenceCount?: number;
+    noText?: boolean;
     background?: string;
 }): QualityReport {
-    const { frame, cutout, facts, sourceHash, background } = input;
+    const { frame, cutout, facts, sourceHash, background, referenceCount = 0, noText = false } = input;
     const layoutSafe = frame.productScale >= 0.72 && frame.productScale <= 1.28 && Math.abs(frame.productOffsetX) <= 0.24 && Math.abs(frame.productOffsetY) <= 0.24;
     const edgeSafe = Boolean(facts && facts.cutoutWidth >= 96 && facts.cutoutHeight >= 96 && facts.coverage >= 0.025);
-    const copySafe = frame.type !== "卖点图" || Boolean(frame.headline.trim() && frame.supportingLine.trim());
+    const copySafe = noText || frame.type !== "卖点图" || Boolean(frame.headline.trim() && frame.supportingLine.trim());
     const backgroundSafe = frame.template === "catalog" || Boolean(background);
     const checks: QualityCheck[] = [
+        {
+            id: "references",
+            label: "事实证据",
+            status: referenceCount > 0 ? "pass" : "error",
+            detail: referenceCount > 1 ? `${referenceCount} 张商品图已编号并锁定` : referenceCount === 1 ? "1 张商品图，未知角度不会进入规划" : "尚未上传商品证据图",
+        },
         {
             id: "pixels",
             label: "商品像素",
@@ -97,7 +105,7 @@ export function buildQualityReport(input: {
             id: "copy",
             label: "确定性文案",
             status: copySafe ? "pass" : "warning",
-            detail: copySafe ? "文字由 Canvas 渲染，不交给生图模型" : "卖点图缺少标题或辅助文案",
+            detail: noText ? "无字版保留文字安全区" : copySafe ? "文字由 Canvas 渲染，不交给生图模型" : "卖点图缺少标题或辅助文案",
         },
         {
             id: "layout",
