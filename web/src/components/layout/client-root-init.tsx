@@ -23,31 +23,34 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const isLoginPage = pathname === "/login" || pathname === "/admin/login";
+    const isProductAgent = pathname === "/product-suite";
     const adminRemoteTokenRef = useRef("");
 
     useEffect(() => {
+        if (isProductAgent) return;
         void loadPublicSettings();
-    }, [loadPublicSettings]);
+    }, [isProductAgent, loadPublicSettings]);
 
     useEffect(() => {
-        if (!isLoginPage) void hydrateUser();
-    }, [hydrateUser, isLoginPage]);
+        if (!isLoginPage && !isProductAgent) void hydrateUser();
+    }, [hydrateUser, isLoginPage, isProductAgent]);
 
     useEffect(() => {
+        if (isProductAgent) return;
         if (!token || user?.role !== "admin" || adminRemoteTokenRef.current === token) return;
         adminRemoteTokenRef.current = token;
         if (channelMode !== "remote") updateConfig("channelMode", "remote");
-    }, [channelMode, token, updateConfig, user?.role]);
+    }, [channelMode, isProductAgent, token, updateConfig, user?.role]);
 
     useEffect(() => {
+        if (isProductAgent) return;
         if (!token || !user?.id) return;
         void fetchUserConfig(token)
             .then((payload) => {
                 const syncS3 = payload.modelConfig?.syncStorageConfig === true;
                 const syncWebDAV = payload.modelConfig?.syncWebDAVStorageConfig === true;
                 if (payload.modelConfig) {
-                    Object.entries(payload.modelConfig)
-                        .forEach(([key, value]) => updateConfig(key as keyof AiConfig, value as never));
+                    Object.entries(payload.modelConfig).forEach(([key, value]) => updateConfig(key as keyof AiConfig, value as never));
                 }
                 updateConfig("syncStorageConfig", syncS3);
                 updateConfig("syncWebDAVStorageConfig", syncWebDAV);
@@ -67,9 +70,10 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
                 }
             })
             .catch(() => {});
-    }, [token, updateConfig, user?.id]);
+    }, [isProductAgent, token, updateConfig, user?.id]);
 
     useEffect(() => {
+        if (isProductAgent) return;
         if (handledConfigParams.current) return;
         const searchParams = new URLSearchParams(window.location.search);
         const baseUrl = searchParams.get("baseUrl") || searchParams.get("baseurl");
@@ -91,7 +95,7 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         if (baseUrl) updateConfig("baseUrl", baseUrl);
         if (apiKey) updateConfig("apiKey", apiKey);
         openConfigDialog(false);
-    }, [message, openConfigDialog, publicSettings, updateConfig]);
+    }, [isProductAgent, message, openConfigDialog, publicSettings, updateConfig]);
 
     return <>{children}</>;
 }

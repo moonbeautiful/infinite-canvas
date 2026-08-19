@@ -1,13 +1,15 @@
 "use client";
 
 import { auditProductTextIdentity } from "./product-identity-ocr";
+import type { IdentityPolicy } from "./product-marketing-plan";
 
-export type MarketingQualityStatus = "pending" | "pass" | "warning" | "error";
+export type MarketingQualityStatus = "pending" | "pass" | "warning" | "inconclusive" | "error";
+type MarketingQualityCheckStatus = "pass" | "warning" | "inconclusive" | "error";
 
 export type MarketingQualityCheck = {
-    id: "dimensions" | "render" | "product-color" | "product-text" | "silhouette" | "marketplace" | "duplicate" | "campaign";
+    id: "dimensions" | "render" | "product-color" | "product-text" | "silhouette" | "marketplace" | "duplicate" | "view-diversity" | "campaign";
     label: string;
-    status: "pass" | "warning" | "error";
+    status: MarketingQualityCheckStatus;
     detail: string;
 };
 
@@ -27,7 +29,8 @@ type AuditInput = {
     expectedSize: string;
     heroUrl?: string;
     signal?: AbortSignal;
-    previousResults: Array<{ id: string; label: string; url: string }>;
+    identityPolicy?: IdentityPolicy;
+    previousResults: Array<{ id: string; label: string; url: string; identityPolicy?: IdentityPolicy }>;
 };
 
 type ImageSample = {
@@ -58,12 +61,13 @@ export function pendingQualityReport(): MarketingQualityReport {
 
 export async function auditMarketingImage(input: AuditInput): Promise<MarketingQualityReport> {
     throwIfAborted(input.signal);
-    const [source, result, hero, previous, sourceProduct] = await Promise.all([
-        sampleImage(input.source, input.signal),
+    const identityPolicy = input.identityPolicy || "source-locked";
+    const [sourceSamples, result, hero, previous, sourceProducts] = await Promise.all([
+        Promise.all(input.sources.map((source) => sampleImage(source, input.signal))),
         sampleImage(input.resultUrl, input.signal),
         input.heroUrl ? sampleImage(input.heroUrl, input.signal) : Promise.resolve(null),
         Promise.all(input.previousResults.map(async (item) => ({ ...item, sample: await sampleImage(item.url, input.signal) }))),
-        sourceProductSample(input.source, input.signal).catch(() => null),
+        Promise.all(input.sources.map((source) => sourceProductSample(source, input.signal).catch(() => null))),
     ]);
     throwIfAborted(input.signal);
     const checks: MarketingQualityCheck[] = [];
@@ -88,7 +92,7 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
         detail: dynamicRange >= 24 ? "图片包含有效明暗与细节" : "图片接近空白、纯色或损坏",
     });
 
-    const productPalette = sourceProduct?.palette || source.palette;
+    const productPalette = mergePalettes(sourceProducts.flatMap((sample) => sample?.palette || []).concat(sourceSamples.flatMap((sample) => sample.palette)));
     const productColorCoverage = paletteCoverage(result.pixels, productPalette);
     const colorStatus = !productPalette.length ? "warning" : productColorCoverage >= 0.012 ? "pass" : productColorCoverage >= 0.005 ? "warning" : "error";
     checks.push({
@@ -100,40 +104,98 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
 
     if (["hero", "marketplace", "feature", "lifestyle", "detail", "aplus", "banner", "poster"].includes(input.taskId)) {
         try {
-            const primarySubjectOnly = ["feature", "detail", "aplus"].includes(input.taskId);
-            const [sourceShape, resultShape] = await Promise.all([sourceSilhouette(input.source, primarySubjectOnly, input.signal), resultSilhouette(input.resultUrl, primarySubjectOnly, input.signal)]);
+            const primarySubjectOnly = identityPolicy !== "source-locked" || ["feature", "detail", "aplus"].includes(input.taskId);
+            const [sourceShapes, resultShape] = await Promise.all([Promise.all(input.sources.map((source) => sourceSilhouette(source, primarySubjectOnly, input.signal))), resultSilhouette(input.resultUrl, primarySubjectOnly, input.signal)]);
             throwIfAborted(input.signal);
-            const direct = maskIou(sourceShape.mask, resultShape.mask, false);
-            const mirrored = maskIou(sourceShape.mask, resultShape.mask, true);
-            const detailSimilarity = edgeSimilarity(sourceShape.edges, resultShape.edges, false);
-            const mirroredDetails = edgeSimilarity(sourceShape.edges, resultShape.edges, true);
-            const salientDetails = salientEdgeSimilarity(sourceShape.interiorEdges, resultShape.interiorEdges, false);
-            const aspectDelta = Math.abs(sourceShape.aspect - resultShape.aspect) / Math.max(0.01, sourceShape.aspect);
+            const matches = sourceShapes.map((sourceShape) => {
+                const direct = maskIou(sourceShape.mask, resultShape.mask, false);
+                const mirrored = maskIou(sourceShape.mask, resultShape.mask, true);
+                const detailSimilarity = edgeSimilarity(sourceShape.edges, resultShape.edges, false);
+                const mirroredDetails = edgeSimilarity(sourceShape.edges, resultShape.edges, true);
+                const salientDetails = salientEdgeSimilarity(sourceShape.interiorEdges, resultShape.interiorEdges, false);
+                const aspectDelta = Math.abs(sourceShape.aspect - resultShape.aspect) / Math.max(0.01, sourceShape.aspect);
+                return {
+                    direct,
+                    mirrored,
+                    detailSimilarity,
+                    mirroredDetails,
+                    salientDetails,
+                    aspectDelta,
+                    score: direct * 0.55 + detailSimilarity * 0.35 - Math.min(1, aspectDelta) * 0.1,
+                };
+            });
+            const best = matches.sort((left, right) => right.score - left.score)[0];
+            const { direct, mirrored, detailSimilarity, mirroredDetails, salientDetails, aspectDelta } = best;
             const isMirrored = mirrored > direct + 0.07 && mirroredDetails > detailSimilarity + 0.06 && mirrored >= 0.42;
             const identityDetailError = salientDetails.sampleCount >= 4 && salientDetails.lowerQuartile < 0.05;
             const identityDetailWarning = !identityDetailError && salientDetails.sampleCount >= 4 && salientDetails.lowerQuartile < 0.12;
-            const geometryError = isMirrored || direct < 0.26 || detailSimilarity < 0.08 || aspectDelta > 0.55 || identityDetailError;
-            const geometryWarning = !geometryError && (direct < 0.4 || detailSimilarity < 0.18 || aspectDelta > 0.32 || identityDetailWarning);
+            const sourceLockedError = isMirrored || direct < 0.26 || detailSimilarity < 0.08 || aspectDelta > 0.55 || identityDetailError;
+            const sourceLockedWarning = !sourceLockedError && (direct < 0.4 || detailSimilarity < 0.18 || aspectDelta > 0.32 || identityDetailWarning);
+            const multiViewError = direct < 0.1 && detailSimilarity < 0.035;
+            const multiViewWarning = !multiViewError && (direct < 0.2 || detailSimilarity < 0.07 || aspectDelta > 0.8);
+            const geometryStatus: MarketingQualityCheckStatus =
+                identityPolicy === "source-locked"
+                    ? sourceLockedError
+                        ? "error"
+                        : sourceLockedWarning
+                          ? "warning"
+                          : "pass"
+                    : identityPolicy === "detail-crop"
+                      ? direct < 0.06 && detailSimilarity < 0.02
+                          ? "error"
+                          : direct < 0.12 && detailSimilarity < 0.04
+                            ? "warning"
+                            : "pass"
+                      : multiViewError
+                        ? "error"
+                        : multiViewWarning
+                          ? "warning"
+                          : "pass";
             checks.push({
                 id: "silhouette",
-                label: "主体结构与方向",
-                status: geometryError ? "error" : geometryWarning ? "warning" : "pass",
-                detail: isMirrored
-                    ? "结果主体疑似被镜像"
-                    : `轮廓 ${Math.round(direct * 100)}%，结构细节 ${Math.round(detailSimilarity * 100)}%，内部标识与部件 ${Math.round(salientDetails.average * 100)}% / ${Math.round(salientDetails.lowerQuartile * 100)}%，比例偏差 ${Math.round(aspectDelta * 100)}%`,
+                label: identityPolicy === "source-locked" ? "主体结构与方向" : identityPolicy === "detail-crop" ? "局部商品证据" : "多视角商品证据",
+                status: geometryStatus,
+                detail:
+                    identityPolicy === "source-locked" && isMirrored
+                        ? "结果主体疑似被镜像"
+                        : `已在 ${sourceShapes.length} 张原图中取最佳匹配：轮廓 ${Math.round(direct * 100)}%，结构细节 ${Math.round(detailSimilarity * 100)}%，内部证据 ${Math.round(salientDetails.average * 100)}%，比例偏差 ${Math.round(aspectDelta * 100)}%`,
             });
+
+            if (identityPolicy !== "detail-crop") {
+                const comparable = input.previousResults.filter((item) => item.id !== "detail");
+                const previousShapes = await Promise.all(
+                    comparable.map(async (item) => ({
+                        ...item,
+                        shape: await resultSilhouette(item.url, true, input.signal),
+                    })),
+                );
+                const repeatedView = previousShapes.find(({ shape }) => {
+                    const overlap = maskIou(shape.mask, resultShape.mask, false);
+                    const edge = edgeSimilarity(shape.edges, resultShape.edges, false);
+                    const aspect = Math.abs(shape.aspect - resultShape.aspect) / Math.max(0.01, shape.aspect);
+                    return overlap >= 0.76 && edge >= 0.48 && aspect <= 0.12;
+                });
+                checks.push({
+                    id: "view-diversity",
+                    label: "镜头差异",
+                    status: repeatedView ? "error" : "pass",
+                    detail: repeatedView ? `商品镜头与“${repeatedView.label}”过于相似，需要更换机位` : "商品机位与已完成核心镜头存在明确差异",
+                });
+            }
         } catch {
             checks.push({
                 id: "silhouette",
-                label: "主体结构与方向",
-                status: "error",
-                detail: "本地主体结构质检不可用，不能作为完整交付",
+                label: "商品结构证据",
+                status: "inconclusive",
+                detail: "本地主体结构质检暂不可用；结果保留待人工复核，不会因此自动扣费返修",
             });
         }
     }
 
     try {
-        const identity = await auditProductTextIdentity(input.sources, input.identityUrl || input.resultUrl, input.signal);
+        const identity = await auditProductTextIdentity(input.sources, input.identityUrl || input.resultUrl, input.signal, {
+            requireSourceText: identityPolicy === "source-locked",
+        });
         throwIfAborted(input.signal);
         checks.push({
             id: "product-text",
@@ -145,8 +207,8 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
         checks.push({
             id: "product-text",
             label: "商品文字与标识",
-            status: "error",
-            detail: "本地文字标识质检不可用，不能作为完整交付",
+            status: "inconclusive",
+            detail: "本地文字标识质检暂不可用；结果保留待人工复核，不会因此自动扣费返修",
         });
     }
 
@@ -175,16 +237,17 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
         checks.push({
             id: "campaign",
             label: "整套风格",
-            status: similarity >= 0.28 ? "pass" : similarity >= 0.16 ? "warning" : "error",
+            status: similarity >= 0.28 ? "pass" : "warning",
             detail: `与品牌主视觉的色彩/明暗关联 ${Math.round(similarity * 100)}%`,
         });
     }
 
     const errors = checks.filter((check) => check.status === "error");
     const warnings = checks.filter((check) => check.status === "warning");
-    const score = Math.max(0, 100 - errors.length * 35 - warnings.length * 12);
-    const status: MarketingQualityStatus = errors.length ? "error" : warnings.length ? "warning" : "pass";
-    const summary = errors.length ? errors.map((check) => check.detail).join("；") : warnings.length ? warnings.map((check) => check.detail).join("；") : "自动质检通过";
+    const inconclusive = checks.filter((check) => check.status === "inconclusive");
+    const score = Math.max(0, 100 - errors.length * 35 - warnings.length * 12 - inconclusive.length * 6);
+    const status: MarketingQualityStatus = errors.length ? "error" : inconclusive.length ? "inconclusive" : warnings.length ? "warning" : "pass";
+    const summary = errors.length ? errors.map((check) => check.detail).join("；") : inconclusive.length ? inconclusive.map((check) => check.detail).join("；") : warnings.length ? warnings.map((check) => check.detail).join("；") : "自动质检通过";
     return { status, score, summary, checks };
 }
 
@@ -233,6 +296,16 @@ function extractPalette(pixels: Uint8ClampedArray) {
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5)
         .map(([key]) => [((key >> 6) & 7) * 32, ((key >> 3) & 7) * 32, (key & 7) * 32] as [number, number, number]);
+}
+
+function mergePalettes(colors: Array<[number, number, number]>) {
+    const result: Array<[number, number, number]> = [];
+    for (const color of colors) {
+        if (result.some((current) => Math.hypot(current[0] - color[0], current[1] - color[1], current[2] - color[2]) < 36)) continue;
+        result.push(color);
+        if (result.length >= 12) break;
+    }
+    return result;
 }
 
 async function sourceProductSample(file: File, signal?: AbortSignal) {

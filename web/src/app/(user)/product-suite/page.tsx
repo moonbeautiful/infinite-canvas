@@ -1,7 +1,7 @@
 "use client";
 
-import { SimpleProductStudio } from "./simple-product-studio";
+import { LinkFoxProductStudio } from "./linkfox-product-studio";
 
 export default function ProductSuitePage() {
-    return <SimpleProductStudio />;
+    return <LinkFoxProductStudio />;
 }

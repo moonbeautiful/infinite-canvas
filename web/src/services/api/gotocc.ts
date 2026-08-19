@@ -4,6 +4,9 @@ import { imageToDataUrl } from "@/services/image-storage";
 
 const GOTOCC_CONNECTION_KEY = "linkfox:gotocc-connection-v1";
 const allowedModels = ["gpt-image-2", "gpt-image-2-high"] as const;
+const preparedReferenceCache = new WeakMap<File, Promise<File>>();
+const referenceMaxDimension = 1024;
+const referenceMaxBytes = 1024 * 1024;
 
 export type GotoccModel = (typeof allowedModels)[number];
 export type GotoccConnection = {
@@ -19,6 +22,18 @@ export class GotoccGenerationError extends Error {
         super(message);
         this.name = "GotoccGenerationError";
         this.retryable = retryable;
+    }
+}
+
+export class GotoccConnectionError extends Error {
+    clearSavedKey: boolean;
+    status: number;
+
+    constructor(message: string, status: number, clearSavedKey = false) {
+        super(message);
+        this.name = "GotoccConnectionError";
+        this.status = status;
+        this.clearSavedKey = clearSavedKey;
     }
 }
 
@@ -52,8 +67,19 @@ export async function testGotoccConnection(apiKey: string) {
         headers: { "X-Gotocc-API-Key": key },
         cache: "no-store",
     });
-    const payload = (await response.json().catch(() => null)) as { data?: Array<{ id?: string }>; error?: { message?: string }; msg?: string } | null;
-    if (!response.ok) throw new Error(payload?.error?.message || payload?.msg || "gotocc Key 无法使用");
+    const responseText = await response.text();
+    const payload = (() => {
+        try {
+            return JSON.parse(responseText) as { data?: Array<{ id?: string }>; error?: { message?: string }; msg?: string; message?: string };
+        } catch {
+            return null;
+        }
+    })();
+    if (!response.ok) {
+        const upstreamMessage = payload?.error?.message || payload?.msg || payload?.message;
+        const authenticationFailed = response.status === 401 && Boolean(payload);
+        throw new GotoccConnectionError(upstreamMessage || (authenticationFailed ? "gotocc Key 无法使用" : `gotocc 连接服务暂时不可用（${response.status}），请稍后重试`), response.status, authenticationFailed);
+    }
     const models = (payload?.data || []).map((item) => item.id || "").filter(Boolean);
     if (!models.includes("gpt-image-2")) throw new Error("这把 Key 不属于 GPT Image 2 生图分组");
     return models.filter((model): model is GotoccModel => allowedModels.includes(model as GotoccModel));
@@ -88,12 +114,14 @@ export async function generateGotoccBackground(connection: GotoccConnection, pro
 
 export async function generateGotoccProductImage(connection: GotoccConnection, images: File[], prompt: string, size: string, signal?: AbortSignal) {
     if (!images.length || images.length > 4) throw new Error("请上传 1 至 4 张商品图片");
+    const references = await Promise.all(images.map((image) => prepareGotoccReference(image, signal)));
+    throwIfAborted(signal);
     const form = new FormData();
     form.set("model", connection.model);
     form.set("prompt", prompt);
     form.set("size", size);
-    form.set("quality", "medium");
-    images.forEach((image) => form.append("image", image, image.name || "product.png"));
+    form.set("quality", connection.model === "gpt-image-2-high" ? "high" : "medium");
+    references.forEach((image) => form.append("image", image, image.name || "product.webp"));
 
     const controller = new AbortController();
     let timedOut = false;
@@ -144,4 +172,67 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
 
 function validGotoccKey(value: string) {
     return value.startsWith("sk-") && value.length >= 16 && value.length <= 256 && !/\s/.test(value);
+}
+
+function prepareGotoccReference(file: File, signal?: AbortSignal) {
+    const cached = preparedReferenceCache.get(file);
+    if (cached)
+        return cached.then((reference) => {
+            throwIfAborted(signal);
+            return reference;
+        });
+    const promise = resizeGotoccReference(file, signal).catch((error) => {
+        preparedReferenceCache.delete(file);
+        throw error;
+    });
+    preparedReferenceCache.set(file, promise);
+    return promise;
+}
+
+async function resizeGotoccReference(file: File, signal?: AbortSignal) {
+    throwIfAborted(signal);
+    const bitmap = await createImageBitmap(file);
+    throwIfAborted(signal);
+    const longestSide = Math.max(bitmap.width, bitmap.height);
+    if (longestSide <= referenceMaxDimension && file.size <= referenceMaxBytes) {
+        bitmap.close();
+        return file;
+    }
+
+    const scale = Math.min(1, referenceMaxDimension / Math.max(1, longestSide));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) {
+        bitmap.close();
+        return file;
+    }
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    throwIfAborted(signal);
+
+    let blob = await canvasToBlob(canvas, "image/webp", 0.9);
+    if (blob.size > referenceMaxBytes) blob = await canvasToBlob(canvas, "image/webp", 0.78);
+    throwIfAborted(signal);
+    return new File([blob], `${stripExtension(file.name) || "product"}-reference.webp`, {
+        type: "image/webp",
+        lastModified: file.lastModified,
+    });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+    return new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("商品参考图压缩失败"))), type, quality);
+    });
+}
+
+function stripExtension(value: string) {
+    return value.replace(/\.[^.]+$/, "");
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }

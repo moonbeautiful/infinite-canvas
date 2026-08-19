@@ -31,11 +31,12 @@ export function cancelProductIdentityOcr() {
         .catch(() => {});
 }
 
-export async function auditProductTextIdentity(sources: File[], resultUrl: string, signal?: AbortSignal): Promise<ProductTextIdentity> {
+export async function auditProductTextIdentity(sources: File[], resultUrl: string, signal?: AbortSignal, options: { requireSourceText?: boolean } = {}): Promise<ProductTextIdentity> {
     throwIfAborted(signal);
-    const sourceTokens = mergeTokens((await Promise.all(sources.map((source) => sourceIdentityTokens(source, signal)))).flat());
+    const sourceTokenSets = await Promise.all(sources.map((source) => sourceIdentityTokens(source, signal)));
+    const sourceTokens = mergeTokens(sourceTokenSets.flat());
     throwIfAborted(signal);
-    const resultTokens = await recognizeTokens(resultUrl, signal);
+    const resultTokens = await recognizeTokens(resultUrl, signal, 32);
     throwIfAborted(signal);
     const unexpected = resultTokens.filter((resultToken) => resultToken.confidence >= 92 && substantialToken(resultToken.text) && !sourceTokens.some((sourceToken) => tokensMatch(sourceToken.text, resultToken.text)));
     if (unexpected.length) {
@@ -50,25 +51,44 @@ export async function auditProductTextIdentity(sources: File[], resultUrl: strin
             detail: "原图未检出可核对标识，结果也未检出高置信陌生文字",
         };
     }
-    const matched = sourceTokens.filter((sourceToken) => resultTokens.some((resultToken) => tokensMatch(sourceToken.text, resultToken.text)));
-    const coverage = matched.length / sourceTokens.length;
-    const expected = sourceTokens.map((token) => token.text).join("、");
-    const missing = sourceTokens.filter((token) => !matched.includes(token)).map((token) => token.text);
+    const candidates = sourceTokenSets
+        .map((tokens) => tokens.filter((token) => token.confidence >= 85 && substantialToken(token.text)))
+        .filter((tokens) => tokens.length)
+        .map((tokens) => {
+            const matched = tokens.filter((sourceToken) => resultTokens.some((resultToken) => tokensMatch(sourceToken.text, resultToken.text)));
+            return { tokens, matched, coverage: matched.length / tokens.length };
+        })
+        .sort((left, right) => right.coverage - left.coverage || right.matched.length - left.matched.length);
+    if (!candidates.length) {
+        return {
+            status: "pass",
+            detail: "原图未检出稳定可核对标识，结果也未检出高置信陌生文字",
+        };
+    }
+    const { tokens: requiredSourceTokens, matched, coverage } = candidates[0];
+    const expected = requiredSourceTokens.map((token) => token.text).join("、");
+    const missing = requiredSourceTokens.filter((token) => !matched.includes(token)).map((token) => token.text);
     if (coverage >= 0.6) {
         return {
             status: "pass",
-            detail: `保留 ${matched.length}/${sourceTokens.length} 个原图标识：${expected}`,
+            detail: `保留 ${matched.length}/${requiredSourceTokens.length} 个原图标识：${expected}`,
         };
     }
-    if (coverage >= 0.4 && matched.length >= 2) {
+    if (coverage >= 0.4 || matched.length >= 2) {
         return {
-            status: "pass",
+            status: options.requireSourceText ? "warning" : "pass",
             detail: `未检出新增文字；部分原图标识未稳定识别：${missing.join("、") || expected}`,
         };
     }
+    if (!options.requireSourceText) {
+        return {
+            status: "pass",
+            detail: "当前镜头未稳定检出原图标识，但未发现任何高置信陌生文字",
+        };
+    }
     return {
-        status: "pass",
-        detail: `未检出新增文字；原图标识无法稳定核对：${missing.join("、") || expected}`,
+        status: "error",
+        detail: `原图可见标识在结果中全部缺失或无法核对：${missing.join("、") || expected}`,
     };
 }
 
@@ -79,7 +99,7 @@ function sourceIdentityTokens(file: File, signal?: AbortSignal) {
             throwIfAborted(signal);
             return tokens;
         });
-    const promise = recognizeTokens(file, signal).catch((error) => {
+    const promise = recognizeTokens(file, signal, Number.POSITIVE_INFINITY).catch((error) => {
         sourceTokenCache.delete(file);
         throw error;
     });
@@ -87,7 +107,7 @@ function sourceIdentityTokens(file: File, signal?: AbortSignal) {
     return promise;
 }
 
-function recognizeTokens(image: File | string, signal?: AbortSignal) {
+function recognizeTokens(image: File | string, signal?: AbortSignal, limit = 32) {
     const job = workerQueue.then(async () => {
         throwIfAborted(signal);
         const worker = await getWorker();
@@ -103,7 +123,8 @@ function recognizeTokens(image: File | string, signal?: AbortSignal) {
             const current = unique.get(text);
             if (!current || word.confidence > current.confidence) unique.set(text, { text, confidence: word.confidence });
         }
-        return [...unique.values()].sort((left, right) => right.confidence - left.confidence).slice(0, 12);
+        const tokens = [...unique.values()].sort((left, right) => right.confidence - left.confidence);
+        return Number.isFinite(limit) ? tokens.slice(0, limit) : tokens;
     });
     workerQueue = job.then(
         () => undefined,
@@ -190,7 +211,7 @@ function mergeTokens(tokens: OcrToken[]) {
         const current = unique.get(token.text);
         if (!current || token.confidence > current.confidence) unique.set(token.text, token);
     }
-    return [...unique.values()].sort((left, right) => right.confidence - left.confidence).slice(0, 20);
+    return [...unique.values()].sort((left, right) => right.confidence - left.confidence);
 }
 
 function throwIfAborted(signal?: AbortSignal) {

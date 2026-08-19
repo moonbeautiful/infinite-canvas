@@ -16,6 +16,37 @@ export default function nextConfig(phase: string): NextConfig {
     return {
         output: "standalone",
         allowedDevOrigins: isDev ? ["*.*.*.*"] : [],
+        async headers() {
+            return [
+                {
+                    source: "/product-suite",
+                    headers: [
+                        {
+                            key: "Cache-Control",
+                            value: "public, max-age=0, s-maxage=86400, stale-while-revalidate=604800",
+                        },
+                    ],
+                },
+                {
+                    source: "/models/:path*",
+                    headers: [
+                        {
+                            key: "Cache-Control",
+                            value: "public, max-age=86400, stale-while-revalidate=604800",
+                        },
+                    ],
+                },
+                {
+                    source: "/ocr/:path*",
+                    headers: [
+                        {
+                            key: "Cache-Control",
+                            value: "public, max-age=86400, stale-while-revalidate=604800",
+                        },
+                    ],
+                },
+            ];
+        },
         async redirects() {
             return [
                 { source: "/", destination: "/product-suite", permanent: false },
@@ -28,9 +59,6 @@ export default function nextConfig(phase: string): NextConfig {
                 { source: "/asset-library", destination: "/product-suite", permanent: false },
                 { source: "/workflows", destination: "/product-suite", permanent: false },
             ];
-        },
-        typescript: {
-            ignoreBuildErrors: true,
         },
         env: {
             NEXT_PUBLIC_APP_VERSION: localVersion,
