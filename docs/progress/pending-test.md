@@ -50,4 +50,7 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 全仓 `tsc --noEmit`、Next.js 生产构建（含 TypeScript）、Go `go test ./...` 和 11 条任务矩阵/ZIP 门禁断言通过。
 - 浏览器空白首访没有 `/api/settings`、gotocc 生图请求、控制台错误或项目资源失败。
 - 当前浏览器保存的 gotocc Key 真实检测返回 `401`，本轮无法执行新的付费 8 图对照；页面已自动清除失效连接状态。
-- `/product-suite` 已添加 `s-maxage` 响应头，但生产 Cloudflare 仍需 Cache Rule 后验收第二次请求 `cf-cache-status: HIT` 与递增 `Age`；仅有响应头不能证明已消除 Render Free 冷启动。
+- `ic` CNAME 已切换为 Cloudflare Proxied，SSL/TLS 模式为 `Full`；Cloudflare Trace 确认原 Cache Rule 命中，但 Render 的 Cloudflare for SaaS O2O 链路仍持续返回 `DYNAMIC`。
+- 已部署 `product-suite-edge-cache` Worker，并以 `ic.xinglinhui.com/*` 精确路由接入生产；只缓存无查询参数的公开工作台 HTML、Next 静态文件、OCR、U2-Net、WASM 和案例资源。
+- `/product-suite` 的 `v2-7cff0a8` 边缘缓存实测首次 `MISS`、第二次 `HIT`、`Age` 递增且 `rndr-id` 不变，边缘 TTL 为 24 小时；Next CSS 同样验证 `MISS → HIT`。
+- `/api/gotocc/*`、查询参数、Cookie、RSC、Next 预取、鉴权、Range 和非 GET 请求全部绕过 Worker Cache；RSC 请求仍返回 `text/x-component`，生产页面控制台 0 报错。

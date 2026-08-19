@@ -1,0 +1,8 @@
+name = "product-suite-edge-cache"
+main = "worker.mjs"
+compatibility_date = "2026-08-19"
+workers_dev = true
+
+[[routes]]
+pattern = "ic.xinglinhui.com/*"
+zone_name = "xinglinhui.com"
