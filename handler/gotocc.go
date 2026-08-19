@@ -79,6 +79,11 @@ func proxyGotoccRequest(w http.ResponseWriter, r *http.Request, method string, p
 
 	response, err := gotoccHTTPClient.Do(request)
 	if err != nil {
+		if method == http.MethodPost {
+			w.Header().Set("X-Upstream-State", "unknown")
+			FailWithStatus(w, http.StatusBadGateway, "gotocc 请求状态未知，请先核对 gotocc 记录")
+			return
+		}
 		FailWithStatus(w, http.StatusBadGateway, "gotocc 请求失败")
 		return
 	}

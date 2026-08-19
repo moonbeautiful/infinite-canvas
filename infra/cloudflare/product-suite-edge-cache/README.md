@@ -8,15 +8,16 @@ not persist responses through Render's Cloudflare for SaaS O2O path.
 
 Cached:
 
-- Query-free `GET /product-suite` HTML.
+- `GET /product-suite` HTML with no query or only recognized tracking
+  parameters (all `utm_*`, `gclid`, `fbclid`).
 - `/_next/static/*`.
 - `/ocr/*`, `/models/*`, `/wasm/*`, and `/demo/*`.
 
 Always bypassed:
 
 - Every `/api/*` request.
-- Non-GET requests and any query string.
-- Cookie, authorization, gotocc key, Origin, Range, conditional, RSC,
+- Non-GET requests and content-affecting query strings.
+- Cookie, authorization, gotocc key, Origin, Range, RSC,
   Next router prefetch, and middleware prefetch requests.
 - Non-200, non-HTML page responses, HTML asset responses, `Set-Cookie`,
   `private`, `no-store`, or unknown `Vary` responses.
@@ -29,13 +30,22 @@ Run the unit tests before deployment:
 node --test worker.test.mjs
 ```
 
+`GET /` is redirected to `/product-suite` by the Worker while preserving
+tracking parameters, so it does not wake Render or lose attribution.
+Conditional page requests remain cache eligible; when the edge misses,
+validators are stripped from the canonical origin request to prevent a
+cached `304`.
+
 Every Render release that changes the shell or unhashed support assets
-must increment `CACHE_VERSION` in `worker.mjs`. Deploy with Wrangler or
-the Cloudflare dashboard, then verify:
+must increment `CACHE_VERSION` in `worker.mjs`. Deploy Render first,
+then deploy the Worker with Wrangler or the Cloudflare dashboard and
+verify:
 
 ```bash
 curl -sS -D - -o /dev/null https://ic.xinglinhui.com/product-suite
 curl -sS -D - -o /dev/null https://ic.xinglinhui.com/product-suite
+curl -sS -D - -o /dev/null 'https://ic.xinglinhui.com/product-suite?utm_source=smoke'
+curl -sS -D - -o /dev/null https://ic.xinglinhui.com/
 ```
 
 For a cold version key in the same Cloudflare edge location, the first

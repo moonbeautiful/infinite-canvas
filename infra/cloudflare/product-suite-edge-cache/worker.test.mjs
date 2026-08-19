@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   createCacheKey,
+  createOriginRequest,
+  getEdgeRedirect,
   getPolicy,
   responseIsSafe,
   shouldBypass,
@@ -25,6 +27,14 @@ test("only public cache paths receive a policy", () => {
   assert.equal(
     getPolicy(new URL("https://ic.xinglinhui.com/product-suite?_rsc=1")),
     null,
+  );
+  assert.equal(
+    getPolicy(
+      new URL(
+        "https://ic.xinglinhui.com/product-suite?utm_source=review&utm_id=42&utm_source_platform=partner",
+      ),
+    )?.type,
+    "page",
   );
   assert.equal(
     getPolicy(new URL("https://ic.xinglinhui.com/api/gotocc/models")),
@@ -70,6 +80,19 @@ test("API, non-GET, identity and RSC requests bypass", () => {
     true,
   );
   assert.equal(shouldBypass(new Request(pageUrl), pageUrl, policy), false);
+  assert.equal(
+    shouldBypass(
+      new Request(pageUrl, {
+        headers: {
+          "If-None-Match": '"cached"',
+          "If-Modified-Since": "Wed, 19 Aug 2026 00:00:00 GMT",
+        },
+      }),
+      pageUrl,
+      policy,
+    ),
+    false,
+  );
 });
 
 test("only expected HTML responses are cached as pages", () => {
@@ -157,8 +180,38 @@ test("cache key is versioned and varies on content encoding", () => {
 
   assert.match(
     new URL(gzipKey.url).pathname,
-    /^\/__product_suite_edge_cache\/v2-7cff0a8\//,
+    /^\/__product_suite_edge_cache\/v3-20260819\//,
   );
   assert.equal(gzipKey.headers.get("accept-encoding"), "gzip");
   assert.equal(brKey.headers.get("accept-encoding"), "br");
+});
+
+test("tracking links share the canonical page cache and origin request", () => {
+  const trackingUrl = new URL(
+    "https://ic.xinglinhui.com/product-suite?utm_source=review&gclid=123",
+  );
+  const request = new Request(trackingUrl, {
+    headers: {
+      "If-None-Match": '"old"',
+      "If-Modified-Since": "Wed, 19 Aug 2026 00:00:00 GMT",
+    },
+  });
+  const key = createCacheKey(request, trackingUrl);
+  const origin = createOriginRequest(request, trackingUrl);
+
+  assert.equal(new URL(key.url).search, "");
+  assert.equal(new URL(origin.url).search, "");
+  assert.equal(origin.headers.has("if-none-match"), false);
+  assert.equal(origin.headers.has("if-modified-since"), false);
+});
+
+test("root navigation redirects at the edge without Render", () => {
+  const rootUrl = new URL("https://ic.xinglinhui.com/?utm_source=review");
+  const response = getEdgeRedirect(new Request(rootUrl), rootUrl);
+
+  assert.equal(response?.status, 307);
+  assert.equal(
+    response?.headers.get("location"),
+    "https://ic.xinglinhui.com/product-suite?utm_source=review",
+  );
 });

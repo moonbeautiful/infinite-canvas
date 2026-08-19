@@ -1,5 +1,5 @@
 const HOST = "ic.xinglinhui.com";
-const CACHE_VERSION = "v2-7cff0a8";
+const CACHE_VERSION = "v3-20260819";
 
 const BYPASS_HEADERS = [
   "authorization",
@@ -8,8 +8,6 @@ const BYPASS_HEADERS = [
   "origin",
   "range",
   "if-match",
-  "if-none-match",
-  "if-modified-since",
   "if-unmodified-since",
   "x-api-key",
   "x-gotocc-api-key",
@@ -36,11 +34,11 @@ const PAGE_VARY_HEADERS = new Set([
 
 const STATIC_VARY_HEADERS = new Set(["accept-encoding"]);
 const SUPPORT_ASSET_PREFIXES = ["/ocr/", "/models/", "/wasm/", "/demo/"];
+const TRACKING_PARAMETERS = new Set(["gclid", "fbclid"]);
 
 export function getPolicy(url) {
-  if (url.search) return null;
-
   if (url.pathname === "/product-suite") {
+    if (!hasOnlyTrackingParameters(url)) return null;
     return {
       type: "page",
       edgeTtl: 86400,
@@ -49,6 +47,8 @@ export function getPolicy(url) {
       allowedVary: PAGE_VARY_HEADERS,
     };
   }
+
+  if (url.search) return null;
 
   if (url.pathname.startsWith("/_next/static/")) {
     return {
@@ -72,6 +72,23 @@ export function getPolicy(url) {
   }
 
   return null;
+}
+
+export function getEdgeRedirect(request, url) {
+  if (
+    request.method !== "GET" ||
+    url.protocol !== "https:" ||
+    url.hostname !== HOST ||
+    url.pathname !== "/" ||
+    !hasOnlyTrackingParameters(url) ||
+    request.headers.has("authorization") ||
+    request.headers.has("rsc") ||
+    request.headers.has("next-router-state-tree")
+  ) {
+    return null;
+  }
+
+  return Response.redirect(`https://${HOST}/product-suite${url.search}`, 307);
 }
 
 export function hasBypassHeader(headers) {
@@ -121,6 +138,7 @@ export function responseIsSafe(response, policy) {
 
 export function createCacheKey(request, url) {
   const keyUrl = new URL(url);
+  keyUrl.search = "";
   keyUrl.pathname =
     `/__product_suite_edge_cache/${CACHE_VERSION}` + url.pathname;
 
@@ -136,6 +154,19 @@ export function createCacheKey(request, url) {
   });
 }
 
+export function createOriginRequest(request, url) {
+  const originUrl = new URL(url);
+  originUrl.search = "";
+  const headers = new Headers(request.headers);
+  headers.delete("if-none-match");
+  headers.delete("if-modified-since");
+  return new Request(originUrl.toString(), {
+    method: "GET",
+    headers,
+    redirect: "manual",
+  });
+}
+
 function responseForClient(response, policy, status) {
   const clientResponse = new Response(response.body, response);
   clientResponse.headers.set("Cache-Control", policy.clientCacheControl);
@@ -147,6 +178,10 @@ function responseForClient(response, policy, status) {
 export default {
   async fetch(request, _env, ctx) {
     const url = new URL(request.url);
+    const redirect = getEdgeRedirect(request, url);
+    if (redirect) {
+      return redirect;
+    }
     const policy = getPolicy(url);
 
     if (shouldBypass(request, url, policy)) {
@@ -165,7 +200,7 @@ export default {
       console.error("cache.match failed", error);
     }
 
-    const originResponse = await fetch(request);
+    const originResponse = await fetch(createOriginRequest(request, url));
     if (!responseIsSafe(originResponse, policy)) {
       return originResponse;
     }
@@ -192,3 +227,9 @@ export default {
     return clientResponse;
   },
 };
+
+function hasOnlyTrackingParameters(url) {
+  return [...url.searchParams.keys()].every(
+    (name) => name.startsWith("utm_") || TRACKING_PARAMETERS.has(name),
+  );
+}

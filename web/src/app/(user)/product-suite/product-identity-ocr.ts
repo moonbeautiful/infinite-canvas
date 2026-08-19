@@ -5,6 +5,7 @@ import type { Worker } from "tesseract.js";
 export type ProductTextIdentity = {
     status: "pass" | "warning" | "error";
     detail: string;
+    issue: "none" | "unexpected" | "missing";
 };
 
 type OcrToken = {
@@ -31,7 +32,15 @@ export function cancelProductIdentityOcr() {
         .catch(() => {});
 }
 
-export async function auditProductTextIdentity(sources: File[], resultUrl: string, signal?: AbortSignal, options: { requireSourceText?: boolean } = {}): Promise<ProductTextIdentity> {
+export async function auditProductTextIdentity(
+    sources: File[],
+    resultUrl: string,
+    signal?: AbortSignal,
+    options: {
+        requireSourceText?: boolean;
+        missingSourceTextStatus?: "pass" | "warning" | "error";
+    } = {},
+): Promise<ProductTextIdentity> {
     throwIfAborted(signal);
     const sourceTokenSets = await Promise.all(sources.map((source) => sourceIdentityTokens(source, signal)));
     const sourceTokens = mergeTokens(sourceTokenSets.flat());
@@ -43,12 +52,14 @@ export async function auditProductTextIdentity(sources: File[], resultUrl: strin
         return {
             status: "error",
             detail: `结果新增了原图中没有的文字：${unexpected.map((token) => token.text).join("、")}`,
+            issue: "unexpected",
         };
     }
     if (!sourceTokens.length) {
         return {
             status: "pass",
             detail: "原图未检出可核对标识，结果也未检出高置信陌生文字",
+            issue: "none",
         };
     }
     const candidates = sourceTokenSets
@@ -63,32 +74,38 @@ export async function auditProductTextIdentity(sources: File[], resultUrl: strin
         return {
             status: "pass",
             detail: "原图未检出稳定可核对标识，结果也未检出高置信陌生文字",
+            issue: "none",
         };
     }
     const { tokens: requiredSourceTokens, matched, coverage } = candidates[0];
     const expected = requiredSourceTokens.map((token) => token.text).join("、");
     const missing = requiredSourceTokens.filter((token) => !matched.includes(token)).map((token) => token.text);
+    const missingSourceTextStatus = options.requireSourceText ? "error" : options.missingSourceTextStatus || "pass";
     if (coverage >= 0.6) {
         return {
             status: "pass",
             detail: `保留 ${matched.length}/${requiredSourceTokens.length} 个原图标识：${expected}`,
+            issue: "none",
         };
     }
     if (coverage >= 0.4 || matched.length >= 2) {
         return {
-            status: options.requireSourceText ? "warning" : "pass",
+            status: options.requireSourceText ? "warning" : missingSourceTextStatus,
             detail: `未检出新增文字；部分原图标识未稳定识别：${missing.join("、") || expected}`,
+            issue: "missing",
         };
     }
-    if (!options.requireSourceText) {
+    if (missingSourceTextStatus === "pass") {
         return {
             status: "pass",
             detail: "当前镜头未稳定检出原图标识，但未发现任何高置信陌生文字",
+            issue: "none",
         };
     }
     return {
-        status: "error",
+        status: missingSourceTextStatus,
         detail: `原图可见标识在结果中全部缺失或无法核对：${missing.join("、") || expected}`,
+        issue: "missing",
     };
 }
 

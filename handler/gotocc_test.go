@@ -2,12 +2,20 @@ package handler
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type gotoccRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn gotoccRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func TestValidGotoccKey(t *testing.T) {
 	if !validGotoccKey("sk-1234567890abcdef") {
@@ -17,6 +25,34 @@ func TestValidGotoccKey(t *testing.T) {
 		if validGotoccKey(value) {
 			t.Fatalf("expected key to be rejected: %q", value)
 		}
+	}
+}
+
+func TestProxyGotoccPostTransportErrorMarksUnknown(t *testing.T) {
+	previousClient := gotoccHTTPClient
+	gotoccHTTPClient = &http.Client{
+		Transport: gotoccRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("connection reset")
+		}),
+	}
+	t.Cleanup(func() {
+		gotoccHTTPClient = previousClient
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/gotocc/images/edits", strings.NewReader("body"))
+	request.Header.Set(gotoccKeyHeader, "sk-1234567890abcdef")
+	recorder := httptest.NewRecorder()
+
+	proxyGotoccRequest(recorder, request, http.MethodPost, "/images/edits", []byte("body"), "application/json")
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", recorder.Code)
+	}
+	if got := recorder.Header().Get("X-Upstream-State"); got != "unknown" {
+		t.Fatalf("expected unknown upstream state, got %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), "状态未知") {
+		t.Fatalf("expected unknown-state response, got %s", recorder.Body.String())
 	}
 }
 

@@ -11,11 +11,12 @@ export type StoredMarketingTask = {
     url: string;
     modelUrl?: string;
     error: string;
+    upstreamStateUnknown?: boolean;
     quality?: MarketingQualityReport;
 };
 
 export type MarketingAgentDraft = {
-    version: 1 | 2 | 3 | 4 | 5 | 6;
+    version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
     updatedAt: string;
     images: File[];
     brief?: string;
@@ -38,13 +39,13 @@ const historyKey = "history-v1";
 
 export async function loadMarketingAgentDraft() {
     const draft = await store.getItem<MarketingAgentDraft>(draftKey);
-    return draft?.version === 1 || draft?.version === 2 || draft?.version === 3 || draft?.version === 4 || draft?.version === 5 || draft?.version === 6 ? draft : null;
+    return draft?.version === 1 || draft?.version === 2 || draft?.version === 3 || draft?.version === 4 || draft?.version === 5 || draft?.version === 6 || draft?.version === 7 ? draft : null;
 }
 
 export async function saveMarketingAgentDraft(draft: Omit<MarketingAgentDraft, "version" | "updatedAt">) {
     await store.setItem<MarketingAgentDraft>(draftKey, {
         ...draft,
-        version: 6,
+        version: 7,
         updatedAt: new Date().toISOString(),
     });
 }
@@ -59,7 +60,7 @@ export async function saveMarketingAgentHistory(draft: Omit<MarketingAgentDraft,
     const item: MarketingAgentHistoryItem = {
         ...draft,
         id: `${Date.now()}-${crypto.randomUUID()}`,
-        version: 6,
+        version: 7,
         updatedAt,
     };
     const next = [item, ...current].slice(0, 5);

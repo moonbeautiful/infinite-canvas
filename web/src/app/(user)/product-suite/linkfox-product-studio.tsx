@@ -1,7 +1,7 @@
 "use client";
 
 import { App, Button, ConfigProvider, Input, Modal, theme as antdTheme } from "antd";
-import { zipSync } from "fflate";
+import { zip } from "fflate";
 import { saveAs } from "file-saver";
 import { Archive, Check, ChevronDown, CircleHelp, Download, Eye, FileImage, History, ImagePlus, Images, KeyRound, Layers3, LoaderCircle, RefreshCw, ShieldCheck, Sparkles, Square, StopCircle, Upload, WandSparkles, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -13,6 +13,8 @@ import { loadMarketingAgentDraft, loadMarketingAgentHistory, saveMarketingAgentD
 import { cancelProductExtraction } from "./product-compositor";
 import { cancelProductIdentityOcr } from "./product-identity-ocr";
 import { auditMarketingImage, pendingQualityReport, type MarketingQualityReport } from "./product-marketing-quality";
+import { allowsAutomaticQualityRepair } from "./product-marketing-quality-rules";
+import { selectDiverseProductReferences } from "./product-reference-selection";
 import {
     buildCampaignManifest,
     buildMarketingPrompt,
@@ -36,6 +38,7 @@ type MarketingTask = MarketingTaskDefinition & {
     url: string;
     modelUrl: string;
     error: string;
+    upstreamStateUnknown: boolean;
     quality: MarketingQualityReport;
 };
 
@@ -48,6 +51,7 @@ type ActiveRun = {
     plan: MarketingTaskDefinition[];
     mode: "suite" | "retry";
     controller: AbortController;
+    contactSheet?: Promise<File | null>;
     taskId?: MarketingTaskId;
     previousTask?: MarketingTask;
 };
@@ -64,14 +68,6 @@ type ExampleCase = {
 const allTaskIds = marketingPlan.map((task) => task.id);
 const taskOrder = new Map(marketingPlan.map((task, index) => [task.id, index]));
 const exampleCases: ExampleCase[] = [
-    {
-        id: "motorcycle",
-        label: "户外机械",
-        description: "主视觉 / 场景 / 卖点",
-        source: "/demo/motorcycle-source.jpg",
-        result: "/demo/motorcycle-target.jpg",
-        brief: "运动摩托车；红黑车身；户外性能；保留车身贴花和可见机械结构",
-    },
     {
         id: "lipstick",
         label: "高端美妆",
@@ -97,6 +93,7 @@ function createTasks(): MarketingTask[] {
         url: "",
         modelUrl: "",
         error: "",
+        upstreamStateUnknown: false,
         quality: pendingQualityReport(),
     }));
 }
@@ -104,6 +101,7 @@ function createTasks(): MarketingTask[] {
 export function LinkFoxProductStudio() {
     const { message, modal } = App.useApp();
     const inputRef = useRef<HTMLInputElement>(null);
+    const addInputRef = useRef<HTMLInputElement>(null);
     const resultsPanelRef = useRef<HTMLElement>(null);
     const abortRef = useRef<AbortController | null>(null);
     const activeRunRef = useRef<ActiveRun | null>(null);
@@ -141,12 +139,13 @@ export function LinkFoxProductStudio() {
     const [previewTask, setPreviewTask] = useState<MarketingTask | null>(null);
     const [auditingTaskId, setAuditingTaskId] = useState<MarketingTaskId | "">("");
     const [historyItems, setHistoryItems] = useState<MarketingAgentHistoryItem[]>([]);
+    const [downloadingSuite, setDownloadingSuite] = useState(false);
 
     const currentPlan = useMemo(() => selectedPlan(selectedTaskIds), [selectedTaskIds]);
     const currentTaskIdSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds]);
     const selectedTasks = tasks.filter((task) => currentTaskIdSet.has(task.id));
     const completedTasks = selectedTasks.filter((task) => task.status === "completed");
-    const auditableTasks = selectedTasks.filter((task) => task.url && (task.quality.status === "pending" || task.quality.status === "inconclusive"));
+    const auditableTasks = selectedTasks.filter((task) => task.url && ["pending", "inconclusive", "error"].includes(task.quality.status));
     const activeTask = tasks.find((task) => task.id === activeTaskId);
     const progress = currentPlan.length ? Math.round((completedTasks.length / currentPlan.length) * 100) : 0;
     const suiteGateTasks = tasks.map((task) => ({
@@ -159,6 +158,8 @@ export function LinkFoxProductStudio() {
     const suiteComplete = isCompleteMarketingSuite(selectedTaskIds, suiteGateTasks);
     const productInputDisabled = loadingExample || generating || Boolean(auditingTaskId);
     const estimatedCost = estimateSuiteCost(currentPlan.length);
+    const maximumEstimatedCost = estimateSuiteCost(currentPlan.length * 2);
+    const repairUnknownUpstreamState = Boolean(repairTask?.upstreamStateUnknown);
 
     const showWorkspaceTab = (tab: WorkspaceTab) => {
         setWorkspaceTab(tab);
@@ -193,6 +194,7 @@ export function LinkFoxProductStudio() {
                         ...task,
                         url: stored.url || "",
                         modelUrl: stored.modelUrl || "",
+                        upstreamStateUnknown: Boolean(stored.upstreamStateUnknown || stored.status === "generating"),
                         quality: stored.quality || pendingQualityReport(),
                     };
                     if (stored.status === "generating")
@@ -231,15 +233,16 @@ export function LinkFoxProductStudio() {
                 brief,
                 campaignOptions,
                 selectedTaskIds,
-                tasks: tasks.map(({ id, status, url, modelUrl, error, quality }) => ({
+                tasks: tasks.map(({ id, status, url, modelUrl, error, upstreamStateUnknown, quality }) => ({
                     id,
                     status,
                     url,
                     modelUrl,
                     error,
+                    upstreamStateUnknown,
                     quality,
                 })),
-            });
+            }).catch(() => {});
         }, 300);
         return () => window.clearTimeout(timer);
     }, [brief, campaignOptions, draftReady, images, selectedTaskIds, tasks]);
@@ -277,21 +280,35 @@ export function LinkFoxProductStudio() {
         setTasks(next);
     };
 
-    const persistRunDraft = (run: ActiveRun) =>
-        saveMarketingAgentDraft({
-            images: run.sourceImages,
-            brief: run.brief,
-            campaignOptions: run.campaignOptions,
-            selectedTaskIds,
-            tasks: tasksRef.current.map(({ id, status, url, modelUrl, error, quality }) => ({
-                id,
-                status,
-                url,
-                modelUrl,
-                error,
-                quality,
-            })),
-        });
+    const acknowledgeUnknownUpstreamState = (ids?: MarketingTaskId[]) => {
+        const selected = ids ? new Set(ids) : null;
+        const next = tasksRef.current.map((task) => (task.upstreamStateUnknown && (!selected || selected.has(task.id)) ? { ...task, upstreamStateUnknown: false } : task));
+        tasksRef.current = next;
+        setTasks(next);
+    };
+
+    const persistRunDraft = async (run: ActiveRun) => {
+        try {
+            await saveMarketingAgentDraft({
+                images: run.sourceImages,
+                brief: run.brief,
+                campaignOptions: run.campaignOptions,
+                selectedTaskIds,
+                tasks: tasksRef.current.map(({ id, status, url, modelUrl, error, upstreamStateUnknown, quality }) => ({
+                    id,
+                    status,
+                    url,
+                    modelUrl,
+                    error,
+                    upstreamStateUnknown,
+                    quality,
+                })),
+            });
+            return true;
+        } catch {
+            return false;
+        }
+    };
 
     const archiveRun = async (run: ActiveRun) => {
         if (!tasksRef.current.some((task) => task.status === "completed" && task.url)) return;
@@ -300,12 +317,13 @@ export function LinkFoxProductStudio() {
             brief: run.brief,
             campaignOptions: run.campaignOptions,
             selectedTaskIds: run.plan.map((task) => task.id),
-            tasks: tasksRef.current.map(({ id, status, url, modelUrl, error, quality }) => ({
+            tasks: tasksRef.current.map(({ id, status, url, modelUrl, error, upstreamStateUnknown, quality }) => ({
                 id,
                 status,
                 url,
                 modelUrl,
                 error,
+                upstreamStateUnknown,
                 quality,
             })),
         });
@@ -413,9 +431,13 @@ export function LinkFoxProductStudio() {
         setWorkspaceTab("results");
     };
 
-    const handleFiles = (files?: FileList | null) => {
+    const handleFiles = (files?: FileList | null, mode: "add" | "replace" = "replace") => {
         if (!files?.length) return;
-        setProductImages([...images, ...Array.from(files)]);
+        if (mode === "add" && images.length >= 5) {
+            message.warning("最多 5 张；请先移除一张或选择“更换全部”");
+            return;
+        }
+        setProductImages(mode === "add" ? [...images, ...Array.from(files)] : Array.from(files));
     };
 
     const clearProductImages = () => {
@@ -464,6 +486,7 @@ export function LinkFoxProductStudio() {
                       url: stored.url || "",
                       modelUrl: stored.modelUrl || "",
                       error: stored.status === "generating" ? "历史快照中的上游任务状态未知" : stored.error || "",
+                      upstreamStateUnknown: Boolean(stored.upstreamStateUnknown || stored.status === "generating"),
                       quality: stored.quality || pendingQualityReport(),
                   }
                 : task;
@@ -540,18 +563,35 @@ export function LinkFoxProductStudio() {
     };
 
     const referencesForTask = async (task: MarketingTaskDefinition, run: ActiveRun, currentResultUrl = "") => {
-        const sourceImages =
-            run.sourceImages.length <= 4
-                ? run.sourceImages
-                : [run.sourceImages[0], taskReference(run.sourceImages, task), await createReferenceContactSheet(run.sourceImages, run.controller.signal)].filter((file, index, files) => files.indexOf(file) === index);
-        if (!currentResultUrl) return sourceImages.slice(0, 4);
+        const selection = await selectDiverseProductReferences(run.sourceImages, task, run.controller.signal);
+        const contactSheet =
+            selection.evidenceFiles.length > 1
+                ? await (run.contactSheet ||= createReferenceContactSheet(selection.evidenceFiles, run.controller.signal).catch((error) => {
+                      run.contactSheet = undefined;
+                      if (error instanceof DOMException && error.name === "AbortError") throw error;
+                      return null;
+                  }))
+                : null;
+        const sourceImages = [...selection.files, ...(contactSheet ? [contactSheet] : [])].filter((file, index, files) => files.indexOf(file) === index);
+        if (!currentResultUrl) {
+            return {
+                images: sourceImages.slice(0, 4),
+                evidenceFiles: selection.evidenceFiles,
+                distinctViewCount: selection.distinctViewCount,
+            };
+        }
         const currentBlob = await (
             await fetch(currentResultUrl, {
                 signal: run.controller.signal,
             })
         ).blob();
         const currentFile = new File([currentBlob], `rejected-${task.id}.png`, { type: currentBlob.type || "image/png" });
-        return [...sourceImages.slice(0, 3), currentFile];
+        const repairEvidence = [sourceImages[0], sourceImages[1], sourceImages[sourceImages.length - 1]].filter((file, index, files): file is File => Boolean(file) && files.indexOf(file) === index);
+        return {
+            images: [...repairEvidence.slice(0, 3), currentFile],
+            evidenceFiles: selection.evidenceFiles,
+            distinctViewCount: selection.distinctViewCount,
+        };
     };
 
     const auditExistingTask = async (task: MarketingTask, heroOverride = "", silent = false, internal = false) => {
@@ -564,17 +604,19 @@ export function LinkFoxProductStudio() {
         auditingRef.current = true;
         setAuditingTaskId(task.id);
         try {
+            const referenceSelection = await selectDiverseProductReferences(sourceImages, task);
             const identityUrl = task.modelUrl || task.url;
             const finalUrl = await applyMarketingCopy(identityUrl, task, briefRef.current, campaignOptionsRef.current.brandColor);
             const heroUrl = heroOverride || (task.id === "hero" ? "" : tasksRef.current.find((item) => item.id === "hero" && item.status === "completed")?.url || "");
             const quality = await auditMarketingImage({
                 taskId: task.id,
-                source: sourceImages[0],
-                sources: sourceImages,
+                source: referenceSelection.evidenceFiles[0],
+                sources: referenceSelection.evidenceFiles,
                 resultUrl: finalUrl,
                 identityUrl,
                 expectedSize: task.size,
                 identityPolicy: task.identityPolicy,
+                distinctViewCount: referenceSelection.distinctViewCount,
                 heroUrl: heroUrl || undefined,
                 previousResults: tasksRef.current
                     .filter((item) => item.id !== task.id && item.status === "completed" && item.url)
@@ -586,11 +628,12 @@ export function LinkFoxProductStudio() {
                     })),
             });
             if (auditRunIdRef.current !== auditId || sourceRevisionRef.current !== sourceRevision || localEditRevisionRef.current !== localEditRevision || tasksRef.current.find((item) => item.id === task.id)?.url !== taskUrl) return null;
+            const upstreamStateUnknown = Boolean(tasksRef.current.find((item) => item.id === task.id)?.upstreamStateUnknown);
             updateTask(task.id, {
-                status: quality.status === "error" ? "error" : "completed",
+                status: upstreamStateUnknown || quality.status === "error" ? "error" : "completed",
                 url: finalUrl,
                 modelUrl: finalUrl === identityUrl ? "" : identityUrl,
-                error: quality.status === "error" ? `免费质检未通过：${quality.summary}` : "",
+                error: upstreamStateUnknown ? "免费质检已完成，但上游付费请求状态仍未知；请先核对 gotocc 记录" : quality.status === "error" ? `免费质检未通过：${quality.summary}` : "",
                 quality,
             });
             if (!silent) {
@@ -601,9 +644,10 @@ export function LinkFoxProductStudio() {
             return quality;
         } catch (error) {
             if (auditRunIdRef.current !== auditId || sourceRevisionRef.current !== sourceRevision || localEditRevisionRef.current !== localEditRevision || tasksRef.current.find((item) => item.id === task.id)?.url !== taskUrl) return null;
+            const upstreamStateUnknown = Boolean(tasksRef.current.find((item) => item.id === task.id)?.upstreamStateUnknown);
             updateTask(task.id, {
                 status: "error",
-                error: error instanceof Error ? `免费质检失败：${error.message}` : "免费质检失败",
+                error: upstreamStateUnknown ? "免费质检失败，且上游付费请求状态仍未知；请先核对 gotocc 记录" : error instanceof Error ? `免费质检失败：${error.message}` : "免费质检失败",
             });
             if (!silent) message.error(`${task.label}免费质检失败`);
             return null;
@@ -629,12 +673,10 @@ export function LinkFoxProductStudio() {
             error: "",
             quality: pendingQualityReport(),
         });
-        await persistRunDraft(run);
         setActiveTaskId(task.id);
         let lastError: unknown;
         let repairDraftUrl = currentResultUrl;
         let activeRepairRequest = repairRequest;
-        const campaignManifest = buildCampaignManifest(run.brief, run.campaignOptions, run.sourceImages.length);
 
         for (let attempt = 1; attempt <= 2; attempt += 1) {
             assertRunActive(run);
@@ -642,13 +684,20 @@ export function LinkFoxProductStudio() {
             try {
                 const references = await referencesForTask(task, run, repairDraftUrl);
                 assertRunActive(run);
+                const campaignManifest = buildCampaignManifest(run.brief, run.campaignOptions, references.distinctViewCount);
                 const prompt = buildMarketingPrompt({
                     task,
                     campaignManifest,
+                    sourceCount: references.distinctViewCount,
                     repairRequest: activeRepairRequest,
                     hasRepairDraft: Boolean(repairDraftUrl),
                 });
-                const generatedUrl = await generateGotoccProductImage(connection as GotoccConnection, references, prompt, task.size, run.controller.signal);
+                if (!(await persistRunDraft(run))) {
+                    throw Object.assign(new Error("浏览器存储空间不足，未发送付费请求；请清理本地历史后重试"), {
+                        retryable: false,
+                    });
+                }
+                const generatedUrl = await generateGotoccProductImage(connection as GotoccConnection, references.images, prompt, task.size, run.controller.signal);
                 assertRunActive(run);
                 updateTask(task.id, {
                     status: "generating",
@@ -657,17 +706,20 @@ export function LinkFoxProductStudio() {
                     error: "",
                     quality: pendingQualityReport(),
                 });
-                await persistRunDraft(run);
+                if (!(await persistRunDraft(run))) {
+                    message.warning("付费原稿已保留在当前页面，但浏览器空间不足，刷新前请先下载该图");
+                }
                 const url = await applyMarketingCopy(generatedUrl, task, run.brief, run.campaignOptions.brandColor);
                 assertRunActive(run);
                 const quality = await auditMarketingImage({
                     taskId: task.id,
-                    source: run.sourceImages[0],
-                    sources: run.sourceImages,
+                    source: references.evidenceFiles[0],
+                    sources: references.evidenceFiles,
                     resultUrl: url,
                     identityUrl: generatedUrl,
                     expectedSize: task.size,
                     identityPolicy: task.identityPolicy,
+                    distinctViewCount: references.distinctViewCount,
                     heroUrl: task.id === "hero" || !heroUrl ? undefined : heroUrl,
                     signal: run.controller.signal,
                     previousResults: tasksRef.current
@@ -686,7 +738,9 @@ export function LinkFoxProductStudio() {
                 if (quality.status === "error") {
                     repairDraftUrl = generatedUrl;
                     activeRepairRequest = automaticRepairRequest(task, quality, repairRequest);
-                    throw Object.assign(new Error(`自动质检未通过：${quality.summary}`), { retryable: true });
+                    throw Object.assign(new Error(`自动质检未通过：${quality.summary}`), {
+                        retryable: allowsAutomaticQualityRepair(quality.checks),
+                    });
                 }
                 return { url, modelUrl, quality };
             } catch (error) {
@@ -724,6 +778,7 @@ export function LinkFoxProductStudio() {
                           url: "",
                           modelUrl: "",
                           error: "",
+                          upstreamStateUnknown: false,
                           quality: pendingQualityReport(),
                       }
                     : task,
@@ -777,6 +832,7 @@ export function LinkFoxProductStudio() {
                     updateTask(task.id, {
                         status: "error",
                         error: error instanceof Error ? error.message : "生成失败",
+                        upstreamStateUnknown: hasUnknownUpstreamState(error),
                     });
                     failed += 1;
                 }
@@ -794,16 +850,24 @@ export function LinkFoxProductStudio() {
 
     const requestGenerateSuite = () => {
         if (loadingExampleRef.current || generatingRef.current || auditingRef.current) return;
-        if (!completedTasks.length) {
+        const attemptedTasks = tasksRef.current.filter((task) => task.status !== "idle" || task.url || task.error);
+        if (!attemptedTasks.length) {
             void generateSuite();
             return;
         }
+        const unknownUpstreamState = attemptedTasks.some((task) => task.upstreamStateUnknown);
         modal.confirm({
-            title: `重新生成已选 ${currentPlan.length} 张？`,
-            content: `现有已选结果会被替换，基础费用约 $${estimatedCost.toFixed(2)}；仅真实质量失败或 425/429 会自动重试一次。`,
-            okText: "确认生成",
+            title: unknownUpstreamState ? `确认 gotocc 记录后重新生成 ${currentPlan.length} 张？` : `重新生成已选 ${currentPlan.length} 张？`,
+            content: `${
+                unknownUpstreamState ? "部分上游请求状态未知，请先确认 gotocc 记录中没有仍在执行的任务。" : "现有已选结果会被替换。"
+            }基础费用约 $${estimatedCost.toFixed(2)}；若每张都触发一次确定性质量返修，单轮最高约 $${maximumEstimatedCost.toFixed(2)}。仅尺寸、空白成像、陌生文字、白底规范或近乎完全重复等高置信失败，以及 425/429 会自动重试一次；结构和机位启发式失败需你确认。`,
+            okText: unknownUpstreamState ? "已确认记录，继续付费" : "确认付费生成",
             cancelText: "取消",
-            onOk: generateSuite,
+            okButtonProps: { danger: unknownUpstreamState },
+            onOk: () => {
+                acknowledgeUnknownUpstreamState();
+                return generateSuite();
+            },
         });
     };
 
@@ -828,6 +892,7 @@ export function LinkFoxProductStudio() {
                 url: result.url,
                 modelUrl: result.modelUrl,
                 error: "",
+                upstreamStateUnknown: false,
                 quality: result.quality,
             });
             await persistRunDraft(run);
@@ -852,12 +917,34 @@ export function LinkFoxProductStudio() {
                 updateTask(task.id, {
                     status: "error",
                     error: error instanceof Error ? error.message : "生成失败",
+                    upstreamStateUnknown: hasUnknownUpstreamState(error),
                 });
             }
         } finally {
             finishedCurrentRun = finishRun(run);
         }
         if (!finishedCurrentRun) return;
+    };
+
+    const requestRetryTask = (task: MarketingTask) => {
+        if (generatingRef.current || auditingRef.current) return;
+        const unknownUpstreamState = task.upstreamStateUnknown;
+        modal.confirm({
+            title: `重新生成“${task.label}”？`,
+            content: unknownUpstreamState
+                ? "刚才的上游请求状态未知。请先在 gotocc 记录中确认没有仍在生成的任务；继续会再次产生约 $0.08 费用，质量失败时最多约 $0.16。"
+                : "本次会再次产生约 $0.08 费用；若质量门禁触发一次定向返修，最高约 $0.16。现有结果会在新结果通过后被替换。",
+            okText: unknownUpstreamState ? "已确认记录，继续付费" : "确认付费生成",
+            cancelText: "取消",
+            okButtonProps: { danger: unknownUpstreamState },
+            onOk: () => {
+                acknowledgeUnknownUpstreamState([task.id]);
+                return retryTask({
+                    ...task,
+                    upstreamStateUnknown: false,
+                });
+            },
+        });
     };
 
     const openRepair = (task: MarketingTask) => {
@@ -868,7 +955,11 @@ export function LinkFoxProductStudio() {
 
     const submitRepair = async () => {
         if (!repairTask || !repairNote.trim() || generatingRef.current || auditingRef.current) return;
-        const target = repairTask;
+        const target = {
+            ...repairTask,
+            upstreamStateUnknown: false,
+        };
+        acknowledgeUnknownUpstreamState([target.id]);
         setRepairTask(null);
         await retryTask(target, repairNote.trim());
         setRepairNote("");
@@ -896,13 +987,15 @@ export function LinkFoxProductStudio() {
                     ? {
                           status: "error",
                           error: "新的付费原稿已收到，本地后处理或质检未完成；请点击免费重新质检",
+                          upstreamStateUnknown: false,
                           quality: pendingQualityReport(),
                       }
                     : {
-                          status: run.previousTask.status,
+                          status: "error",
                           url: run.previousTask.url,
                           modelUrl: run.previousTask.modelUrl,
-                          error: run.previousTask.error,
+                          error: "已请求停止；上游结果状态未知。原结果已保留，请先确认 gotocc 记录后再决定是否重试",
+                          upstreamStateUnknown: true,
                           quality: run.previousTask.quality,
                       },
             );
@@ -918,6 +1011,7 @@ export function LinkFoxProductStudio() {
                     ? {
                           status: "error",
                           error: interrupted.quality.status === "error" ? `自动质检未通过：${interrupted.quality.summary}` : "付费原稿已收到，本地后处理或质检未完成；请点击免费重新质检",
+                          upstreamStateUnknown: false,
                           quality: pendingQualityReport(),
                       }
                     : {
@@ -925,6 +1019,7 @@ export function LinkFoxProductStudio() {
                           url: "",
                           modelUrl: "",
                           error: "已请求停止；上游结果状态未知，为避免重复扣费请先确认 gotocc 记录后再重试",
+                          upstreamStateUnknown: true,
                           quality: pendingQualityReport(),
                       },
             );
@@ -954,16 +1049,29 @@ export function LinkFoxProductStudio() {
     };
 
     const downloadSuite = async () => {
+        if (downloadingSuite) return;
         if (!suiteComplete) {
             message.warning(`完整 ZIP 仍有 ${fullSuiteBlockers.length} 项未通过硬质检`);
             return;
         }
-        const files: Record<string, Uint8Array> = {};
-        for (const task of completedTasks) {
-            const index = (taskOrder.get(task.id) || 0) + 1;
-            files[`${String(index).padStart(2, "0")}-${task.id}-${task.ratio.replace(":", "x")}.png`] = new Uint8Array(await (await fetch(task.url)).arrayBuffer());
+        setDownloadingSuite(true);
+        try {
+            const files: Record<string, Uint8Array> = {};
+            for (const task of completedTasks) {
+                const index = (taskOrder.get(task.id) || 0) + 1;
+                const response = await fetch(task.url);
+                if (!response.ok) throw new Error(`${task.label}下载失败（${response.status}）`);
+                files[`${String(index).padStart(2, "0")}-${task.id}-${task.ratio.replace(":", "x")}.png`] = new Uint8Array(await response.arrayBuffer());
+            }
+            const archive = await new Promise<Uint8Array>((resolve, reject) => {
+                zip(files, { level: 0 }, (error, data) => (error ? reject(error) : resolve(data)));
+            });
+            saveAs(new Blob([new Uint8Array(archive)], { type: "application/zip" }), "product-marketing-suite.zip");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "整套下载失败，请稍后重试");
+        } finally {
+            setDownloadingSuite(false);
         }
-        saveAs(new Blob([Uint8Array.from(zipSync(files, { level: 0 }))], { type: "application/zip" }), "product-marketing-suite.zip");
     };
 
     return (
@@ -1007,13 +1115,14 @@ export function LinkFoxProductStudio() {
                             <MobileNavButton label="历史记录" icon={<History className="size-4" />} active={workspaceTab === "history"} onClick={() => showWorkspaceTab("history")} />
                         </div>
                         {suiteComplete ? (
-                            <Button className="hidden sm:inline-flex" icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
+                            <Button className="hidden sm:inline-flex" loading={downloadingSuite} icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
                                 下载整套
                             </Button>
                         ) : null}
                         <Button
                             aria-label={connection ? "gotocc 已连接" : "连接 gotocc"}
                             title={connection ? `${connection.model} 已连接` : "连接 gotocc"}
+                            className="!h-11 !min-w-11 sm:!h-8 sm:!min-w-8"
                             icon={connection ? <ShieldCheck className="size-4 text-emerald-600" /> : <KeyRound className="size-4" />}
                             onClick={() => setConnectionOpen(true)}
                         >
@@ -1050,7 +1159,7 @@ export function LinkFoxProductStudio() {
                                                 <span className="absolute top-1 left-1 rounded-sm bg-black/65 px-1.5 py-0.5 text-[10px] text-white">{index === 0 ? "主图" : `角度 ${index + 1}`}</span>
                                                 <button
                                                     type="button"
-                                                    className="absolute top-1 right-1 flex size-5 items-center justify-center rounded-sm bg-black/65 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+                                                    className="absolute top-1 right-1 flex size-10 items-center justify-center rounded-sm bg-black/65 text-white opacity-100 transition sm:size-6 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
                                                     aria-label={`移除商品参考图 ${index + 1}`}
                                                     title={`移除商品参考图 ${index + 1}`}
                                                     disabled={productInputDisabled}
@@ -1067,7 +1176,7 @@ export function LinkFoxProductStudio() {
                                                 className="flex aspect-square items-center justify-center rounded border border-dashed border-[#c9cdd4] text-[#86909c] transition hover:border-[#6d3df5] hover:text-[#6d3df5] disabled:cursor-not-allowed disabled:opacity-45"
                                                 aria-label="继续添加商品图"
                                                 title="继续添加商品图"
-                                                onClick={() => inputRef.current?.click()}
+                                                onClick={() => addInputRef.current?.click()}
                                             >
                                                 <ImagePlus className="size-5" />
                                             </button>
@@ -1096,18 +1205,38 @@ export function LinkFoxProductStudio() {
                                     disabled={productInputDisabled}
                                     aria-label="上传商品原图"
                                     onChange={(event) => {
-                                        handleFiles(event.target.files);
+                                        handleFiles(event.target.files, "replace");
+                                        event.target.value = "";
+                                    }}
+                                />
+                                <input
+                                    ref={addInputRef}
+                                    className="hidden"
+                                    type="file"
+                                    accept="image/jpeg,image/png,image/webp"
+                                    multiple
+                                    disabled={productInputDisabled || images.length >= 5}
+                                    aria-label="继续添加商品原图"
+                                    onChange={(event) => {
+                                        handleFiles(event.target.files, "add");
                                         event.target.value = "";
                                     }}
                                 />
                                 <div className="mt-2 flex gap-2">
-                                    <Button block type="primary" className="!bg-[#6d3df5] !shadow-none hover:!bg-[#5b2ee5]" disabled={productInputDisabled} icon={<Upload className="size-3.5" />} onClick={() => inputRef.current?.click()}>
-                                        {previews.length ? "更换 / 添加" : "上传商品图"}
+                                    <Button block type="primary" className="!h-11 !bg-[#6d3df5] !shadow-none hover:!bg-[#5b2ee5] sm:!h-8" disabled={productInputDisabled} icon={<Upload className="size-3.5" />} onClick={() => inputRef.current?.click()}>
+                                        {previews.length ? "更换全部" : "上传商品图"}
                                     </Button>
-                                    <Button disabled={productInputDisabled} onClick={() => void loadExample(exampleCases[0])}>
+                                    {previews.length ? (
+                                        <Button className="!h-11 sm:!h-8" disabled={productInputDisabled || previews.length >= 5} icon={<ImagePlus className="size-3.5" />} onClick={() => addInputRef.current?.click()}>
+                                            添加角度
+                                        </Button>
+                                    ) : null}
+                                    <Button className="!h-11 sm:!h-8" disabled={productInputDisabled} onClick={() => void loadExample(exampleCases[0])}>
                                         {loadingExample ? "载入中" : "试用示例"}
                                     </Button>
-                                    {previews.length ? <Button aria-label="清空商品图" title="清空商品图" disabled={productInputDisabled} icon={<X className="size-3.5" />} onClick={clearProductImages} /> : null}
+                                    {previews.length ? (
+                                        <Button className="!h-11 !w-11 !min-w-11 !p-0 sm:!h-8 sm:!w-8 sm:!min-w-8" aria-label="清空商品图" title="清空商品图" disabled={productInputDisabled} icon={<X className="size-3.5" />} onClick={clearProductImages} />
+                                    ) : null}
                                 </div>
                             </section>
 
@@ -1204,7 +1333,9 @@ export function LinkFoxProductStudio() {
                         <div className="sticky bottom-0 border-t border-[#e5e6eb] bg-white p-4">
                             <div className="mb-2 flex items-center justify-between text-xs text-[#86909c]">
                                 <span>约 12-20 分钟</span>
-                                <span>基础约 ${estimatedCost.toFixed(2)} 起</span>
+                                <span>
+                                    基础约 ${estimatedCost.toFixed(2)} · 含返修最高约 ${maximumEstimatedCost.toFixed(2)}
+                                </span>
                             </div>
                             {generating ? (
                                 <div className="grid grid-cols-[minmax(0,1fr)_42px] gap-2">
@@ -1231,7 +1362,7 @@ export function LinkFoxProductStudio() {
                     </aside>
 
                     <section ref={resultsPanelRef} className="min-w-0 scroll-mt-15 bg-[#f5f6fa] lg:min-h-0 lg:overflow-y-auto">
-                        <div className="sticky top-0 z-10 flex min-h-12 items-center justify-between border-b border-[#e5e6eb] bg-white px-4 sm:px-5">
+                        <div className="sticky top-15 z-10 flex min-h-12 items-center justify-between border-b border-[#e5e6eb] bg-white px-4 sm:px-5 lg:top-0">
                             <div className="flex h-12 items-center gap-5">
                                 <WorkspaceTabButton active={workspaceTab === "results"} onClick={() => setWorkspaceTab("results")}>
                                     生成结果
@@ -1266,7 +1397,7 @@ export function LinkFoxProductStudio() {
                                             </Button>
                                         ) : null}
                                         {suiteComplete ? (
-                                            <Button type="primary" className="!bg-[#1f2329] !shadow-none" icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
+                                            <Button type="primary" loading={downloadingSuite} className="!bg-[#1f2329] !shadow-none" icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
                                                 下载整套 ZIP
                                             </Button>
                                         ) : null}
@@ -1288,7 +1419,7 @@ export function LinkFoxProductStudio() {
                                             onPreview={() => setPreviewTask(task)}
                                             onDownload={() => void downloadTask(task)}
                                             onAudit={() => void auditExistingTask(task)}
-                                            onRetry={() => void retryTask(task)}
+                                            onRetry={() => requestRetryTask(task)}
                                             onRepair={() => openRepair(task)}
                                         />
                                     ))}
@@ -1297,7 +1428,7 @@ export function LinkFoxProductStudio() {
                                 {completedTasks.length ? (
                                     <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#e5e6eb] pt-4">
                                         <p className="text-xs text-[#86909c]">{suiteComplete ? `${marketingPlan.length} 张已全部通过硬质检。` : `完整 ZIP 仍有 ${fullSuiteBlockers.length} 项需处理；黄色警告、待复核或未选择任务均不会进入整套下载。`}</p>
-                                        <Button disabled={!suiteComplete} icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
+                                        <Button disabled={!suiteComplete} loading={downloadingSuite} icon={<Archive className="size-4" />} onClick={() => void downloadSuite()}>
                                             {suiteComplete ? "下载整套 ZIP" : `处理 ${fullSuiteBlockers.length} 项`}
                                         </Button>
                                     </div>
@@ -1346,10 +1477,11 @@ export function LinkFoxProductStudio() {
                 <Modal
                     title={repairTask ? `定向返修 · ${repairTask.label}` : "定向返修"}
                     open={Boolean(repairTask)}
-                    okText="按要求返修"
+                    okText={repairUnknownUpstreamState ? "已确认记录，继续付费" : "确认付费返修"}
                     cancelText="取消"
                     okButtonProps={{
                         disabled: !repairNote.trim() || generating || Boolean(auditingTaskId),
+                        danger: repairUnknownUpstreamState,
                     }}
                     confirmLoading={generating}
                     onCancel={() => {
@@ -1358,7 +1490,10 @@ export function LinkFoxProductStudio() {
                     }}
                     onOk={() => void submitRepair()}
                 >
-                    <p className="mb-3 text-xs leading-5 text-[#86909c]">原商品图始终是身份依据；当前失败稿只用于定位问题。若问题是镜头重复，Agent 会更换机位而不是保留原构图。</p>
+                    <p className="mb-3 text-xs leading-5 text-[#86909c]">
+                        {repairUnknownUpstreamState ? "刚才的上游请求状态未知。请先在 gotocc 记录中确认没有仍在执行的任务；继续可能产生重复费用。" : ""}
+                        本次约 $0.08；若触发一次确定性质量返修，最高约 $0.16。原商品图始终是身份依据；当前失败稿只用于定位问题。若问题是镜头重复，Agent 会更换机位而不是保留原构图。
+                    </p>
                     <Input.TextArea
                         aria-label="返修要求"
                         value={repairNote}
@@ -1388,7 +1523,7 @@ function HeaderTab({ active, children, onClick }: { active: boolean; children: R
 
 function MobileNavButton({ label, icon, active, onClick }: { label: string; icon: React.ReactNode; active: boolean; onClick: () => void }) {
     return (
-        <button type="button" className={cn("flex size-8 items-center justify-center rounded", active ? "bg-[#f0ebff] text-[#6d3df5]" : "text-[#4e5969]")} aria-label={label} title={label} onClick={onClick}>
+        <button type="button" className={cn("flex size-11 items-center justify-center rounded sm:size-8", active ? "bg-[#f0ebff] text-[#6d3df5]" : "text-[#4e5969]")} aria-label={label} title={label} onClick={onClick}>
             {icon}
         </button>
     );
@@ -1463,7 +1598,7 @@ function ResultCard({
     onRepair: () => void;
 }) {
     const mediaRatio = task.ratio === "3:2" ? "aspect-[3/2]" : task.ratio === "2:3" ? "aspect-[2/3] max-h-[680px]" : "aspect-square";
-    const canFreeAudit = Boolean(task.url) && (task.quality.status === "pending" || task.quality.status === "inconclusive");
+    const canFreeAudit = Boolean(task.url) && ["pending", "inconclusive", "error"].includes(task.quality.status);
     return (
         <article className="min-w-0 overflow-hidden rounded-md border border-[#e5e6eb] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
             <div className="flex min-h-14 items-center gap-3 border-b border-[#f0f0f0] px-3">
@@ -1508,14 +1643,14 @@ function ResultCard({
                     <div className="absolute inset-x-3 bottom-3 grid grid-cols-2 gap-2">
                         <button
                             type="button"
-                            className="flex h-9 items-center justify-center gap-2 rounded bg-white text-xs font-medium text-[#1f2329] shadow-sm disabled:opacity-50"
+                            className="flex h-11 items-center justify-center gap-2 rounded bg-white text-xs font-medium text-[#1f2329] shadow-sm disabled:opacity-50 sm:h-9"
                             disabled={generating || auditing}
                             onClick={canFreeAudit ? onAudit : onRetry}
                         >
                             {canFreeAudit ? <ShieldCheck className={cn("size-3.5", auditing && "animate-pulse")} /> : <RefreshCw className="size-3.5" />}
                             {canFreeAudit ? "免费重新质检" : "确认后重试"}
                         </button>
-                        <button type="button" className="flex h-9 items-center justify-center gap-2 rounded bg-[#6d3df5] text-xs font-medium text-white shadow-sm disabled:opacity-50" disabled={generating} onClick={onRepair}>
+                        <button type="button" className="flex h-11 items-center justify-center gap-2 rounded bg-[#6d3df5] text-xs font-medium text-white shadow-sm disabled:opacity-50 sm:h-9" disabled={generating} onClick={onRepair}>
                             <WandSparkles className="size-3.5" />
                             定向返修
                         </button>
@@ -1538,7 +1673,7 @@ function IconAction({ label, icon, accent = false, disabled = false, onClick }: 
     return (
         <button
             type="button"
-            className={cn("flex size-8 items-center justify-center rounded text-white shadow-sm backdrop-blur transition disabled:opacity-45", accent ? "bg-[#6d3df5] hover:bg-[#5b2ee5]" : "bg-black/70 hover:bg-black")}
+            className={cn("flex size-10 items-center justify-center rounded text-white shadow-sm backdrop-blur transition disabled:opacity-45 sm:size-8", accent ? "bg-[#6d3df5] hover:bg-[#5b2ee5]" : "bg-black/70 hover:bg-black")}
             aria-label={label}
             title={label}
             disabled={disabled}
@@ -1566,7 +1701,7 @@ function ExampleGallery({ loading, onUse }: { loading: boolean; onUse: (example:
         <div className="p-4 sm:p-5">
             <div className="mb-4">
                 <h1 className="text-base font-semibold">优秀案例</h1>
-                <p className="mt-1 text-xs text-[#86909c]">选择案例只会载入商品原图和示例商品信息，不会自动扣费生成。</p>
+                <p className="mt-1 text-xs text-[#86909c]">以下为 LinkFox 效果标杆；选择案例只会载入商品原图和示例商品信息，不会自动扣费生成。</p>
             </div>
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2 2xl:grid-cols-3">
                 {exampleCases.map((example) => (
@@ -1647,6 +1782,10 @@ function shouldRetry(error: unknown) {
     return Boolean(error && typeof error === "object" && "retryable" in error && error.retryable === true);
 }
 
+function hasUnknownUpstreamState(error: unknown) {
+    return Boolean(error && typeof error === "object" && "upstreamStateUnknown" in error && error.upstreamStateUnknown === true);
+}
+
 function automaticRepairRequest(task: MarketingTaskDefinition, quality: MarketingQualityReport, originalRequest: string) {
     const directives = quality.checks
         .filter((check) => check.status === "error")
@@ -1658,8 +1797,11 @@ function automaticRepairRequest(task: MarketingTaskDefinition, quality: Marketin
                     return "Return a complete, detailed, nonblank commercial image.";
                 case "product-color":
                     return "Restore the exact product colors and native visible markings using all original references.";
-                case "product-text":
+                case "product-text-unexpected":
+                case "product-text-missing":
                     return "Remove every fabricated word and restore visible native logos or labels from the product references.";
+                case "product-count":
+                    return "Return one main product instance. Remove every duplicate full-product, alternate, reflected, or background copy; keep only explicitly requested partial photographic detail crops.";
                 case "silhouette":
                     return task.identityPolicy === "source-locked"
                         ? "Restore the source-locked silhouette, proportions, visible components, perspective, and left-right orientation."
@@ -1771,20 +1913,6 @@ function loadMarketingImage(src: string) {
         image.onerror = () => reject(new Error("营销图文案合成失败"));
         image.src = src;
     });
-}
-
-function taskReference(files: File[], task: MarketingTaskDefinition) {
-    const preferredIndex: Record<MarketingTaskId, number> = {
-        marketplace: 0,
-        hero: 1,
-        feature: 2,
-        lifestyle: 3,
-        detail: files.length - 1,
-        aplus: 1,
-        banner: 3,
-        poster: 4,
-    };
-    return files[Math.max(0, Math.min(files.length - 1, preferredIndex[task.id]))];
 }
 
 async function createReferenceContactSheet(files: File[], signal?: AbortSignal) {
