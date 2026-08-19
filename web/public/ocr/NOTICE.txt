@@ -1,0 +1,11 @@
+Bundled OCR assets
+
+- Tesseract.js 7.0.0 worker and Tesseract.js Core 7.0.0 runtime files
+  Source: https://github.com/naptha/tesseract.js
+  License: Apache-2.0. See APACHE-2.0.txt.
+- Tesseract English and Simplified Chinese trained data packages 1.0.0
+  Source: https://github.com/naptha/tessdata
+  License: MIT.
+
+The minified worker's embedded third-party notices are preserved in
+worker.min.js.LICENSE.txt.

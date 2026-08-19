@@ -100,20 +100,65 @@ export type ExtractionProgress = {
 
 type LoadedImage = HTMLImageElement;
 
-export async function extractProductWithAi(dataUrl: string, onProgress?: (progress: ExtractionProgress) => void, alphaFloor = 72): Promise<ProductCutout> {
-    const [rembg, ort] = await Promise.all([import("@bunnio/rembg-web"), import("onnxruntime-web")]);
+let rembgModulePromise: Promise<typeof import("@bunnio/rembg-web")> | null = null;
+let rembgSessionPromise: Promise<any> | null = null;
+const rembgOperations = new Set<Promise<Blob>>();
+let rembgResetPromise = Promise.resolve();
+
+export function cancelProductExtraction() {
+    const activeSession = rembgSessionPromise;
+    const activeOperations = [...rembgOperations];
+    rembgSessionPromise = null;
+    rembgOperations.clear();
+    if (!activeSession && !activeOperations.length) return;
+    rembgResetPromise = rembgResetPromise
+        .then(async () => {
+            const rembg = await rembgModulePromise;
+            await rembg?.disposeAllSessions().catch(() => {});
+            await Promise.allSettled([activeSession, ...activeOperations].filter(Boolean));
+            await rembg?.disposeAllSessions().catch(() => {});
+        })
+        .catch(() => {});
+}
+
+export async function extractProductWithAi(dataUrl: string, onProgress?: (progress: ExtractionProgress) => void, alphaFloor = 72, signal?: AbortSignal): Promise<ProductCutout> {
+    throwIfAborted(signal);
+    await rembgResetPromise;
+    throwIfAborted(signal);
+    rembgModulePromise ||= import("@bunnio/rembg-web");
+    const [rembg, ort] = await Promise.all([rembgModulePromise, import("onnxruntime-web")]);
+    throwIfAborted(signal);
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.wasmPaths = "/wasm/";
     rembg.rembgConfig.setCustomModelPath("u2netp", "/models/u2netp.onnx");
     const source = await loadImage(dataUrl);
-    const blob = await (await fetch(dataUrl)).blob();
-    const session = await rembg.newSession("u2netp");
-    const result = await rembg.remove(blob, {
+    throwIfAborted(signal);
+    const blob = await (await fetch(dataUrl, { signal })).blob();
+    throwIfAborted(signal);
+    rembgSessionPromise ||= rembg.newSession("u2netp").catch((error) => {
+        rembgSessionPromise = null;
+        throw error;
+    });
+    const session = await rembgSessionPromise;
+    throwIfAborted(signal);
+    const operation = rembg.remove(blob, {
         session,
         postProcessMask: true,
         onProgress,
     });
+    rembgOperations.add(operation);
+    let result: Blob;
+    try {
+        result = await operation;
+    } finally {
+        rembgOperations.delete(operation);
+    }
+    throwIfAborted(signal);
     return cropTransparentImage(URL.createObjectURL(result), source.naturalWidth, source.naturalHeight, alphaFloor);
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
 export async function extractProductFromWhiteBackground(dataUrl: string, tolerance = 30, feather = 24): Promise<ProductCutout> {

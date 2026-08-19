@@ -252,7 +252,9 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
     return url;
 }
 
-export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
+export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; signal?: AbortSignal }) {
+    const signal = image.signal;
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const serverObjectId = image.storageKey?.startsWith("server:") ? image.storageKey.slice("server:".length) : "";
     const urls = [
         image.dataUrl && !image.dataUrl.startsWith("blob:") ? image.dataUrl : "",
@@ -266,13 +268,14 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
         if (url.startsWith("data:")) return url;
         try {
             const proxyUrl = getProxyUrl(url);
-            const response = await fetch(proxyUrl);
+            const response = await fetch(proxyUrl, { signal });
             if (!response.ok) {
                 lastError = `读取参考图失败：${response.status}`;
                 continue;
             }
             return blobToDataUrl(await response.blob());
         } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") throw error;
             lastError = error instanceof Error ? error.message : "读取参考图失败";
         }
     }

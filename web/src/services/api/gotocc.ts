@@ -12,6 +12,16 @@ export type GotoccConnection = {
     connectedAt: string;
 };
 
+export class GotoccGenerationError extends Error {
+    retryable: boolean;
+
+    constructor(message: string, retryable: boolean) {
+        super(message);
+        this.name = "GotoccGenerationError";
+        this.retryable = retryable;
+    }
+}
+
 export function loadGotoccConnection(): GotoccConnection | null {
     if (typeof window === "undefined") return null;
     try {
@@ -89,6 +99,7 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
     let timedOut = false;
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
     const timeout = window.setTimeout(() => {
         timedOut = true;
         controller.abort();
@@ -105,16 +116,25 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
             error?: { message?: string };
             msg?: string;
         } | null;
-        if (!response.ok) throw new Error(payload?.error?.message || payload?.msg || "商品图生成失败");
+        if (!response.ok) {
+            const retryable = response.status === 425 || response.status === 429;
+            throw new GotoccGenerationError(payload?.error?.message || payload?.msg || "商品图生成失败", retryable);
+        }
         const item = payload?.data?.[0];
         const value = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : item?.url || "";
-        if (!value) throw new Error("gotocc 没有返回商品图");
-        return imageToDataUrl({ dataUrl: value });
+        if (!value) throw new GotoccGenerationError("gotocc 没有返回商品图，本次不会自动重试", false);
+        try {
+            return await imageToDataUrl({ dataUrl: value, signal: controller.signal });
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") throw error;
+            throw new GotoccGenerationError("商品图读取失败，本次不会自动重试", false);
+        }
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
-            if (signal?.aborted && !timedOut) throw new Error("已停止生成");
-            throw new Error("生成超时，请重试");
+            if (signal?.aborted && !timedOut) throw new GotoccGenerationError("已停止生成", false);
+            throw new GotoccGenerationError("生成超时，请手动重试；为避免重复扣费，本次不自动重试", false);
         }
+        if (error instanceof TypeError) throw new GotoccGenerationError("网络连接中断，结果状态未知；为避免重复扣费，请手动确认后重试", false);
         throw error;
     } finally {
         signal?.removeEventListener("abort", abort);
