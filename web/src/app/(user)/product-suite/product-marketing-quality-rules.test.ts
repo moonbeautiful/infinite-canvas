@@ -1,7 +1,7 @@
 // @ts-nocheck -- Bun provides the test runner in deployment tooling, not Next's type environment.
 import { describe, expect, test } from "bun:test";
 
-import { allowsAutomaticQualityRepair, componentEvidence, evaluateGeometryEvidence, hasRepeatedProductInstance, isRepeatedProductView, requiresProductCountCheck } from "./product-marketing-quality-rules";
+import { componentEvidence, evaluateGeometryEvidence, hasRepeatedProductInstance, requiresProductCountCheck } from "./product-marketing-quality-rules";
 
 const stableEvidence = {
     direct: 0.36,
@@ -62,30 +62,6 @@ describe("product marketing quality rules", () => {
         ).toBe("pass");
     });
 
-    test("detects repeated product poses at a lower practical threshold", () => {
-        expect(
-            isRepeatedProductView({
-                overlap: 0.73,
-                edgeSimilarity: 0.38,
-                aspectDelta: 0.11,
-            }),
-        ).toBe(true);
-        expect(
-            isRepeatedProductView({
-                overlap: 0.52,
-                edgeSimilarity: 0.31,
-                aspectDelta: 0.24,
-            }),
-        ).toBe(false);
-        expect(
-            isRepeatedProductView({
-                overlap: 0.86,
-                edgeSimilarity: 0.14,
-                aspectDelta: 0.08,
-            }),
-        ).toBe(false);
-    });
-
     test("rejects only unexpected similarly shaped product instances", () => {
         const components = componentEvidence([1200, 940, 20], 0.72);
         expect(components.significantCount).toBe(2);
@@ -101,19 +77,5 @@ describe("product marketing quality rules", () => {
         expect(requiresProductCountCheck("lifestyle")).toBe(true);
         expect(requiresProductCountCheck("feature")).toBe(true);
         expect(requiresProductCountCheck("detail")).toBe(false);
-    });
-
-    test("requires user confirmation for heuristic quality failures", () => {
-        expect(allowsAutomaticQualityRepair([{ id: "dimensions", status: "error" }])).toBe(true);
-        expect(allowsAutomaticQualityRepair([{ id: "product-text-unexpected", status: "error" }])).toBe(true);
-        expect(allowsAutomaticQualityRepair([{ id: "product-text-missing", status: "error" }])).toBe(false);
-        expect(allowsAutomaticQualityRepair([{ id: "view-diversity", status: "error" }])).toBe(false);
-        expect(
-            allowsAutomaticQualityRepair([
-                { id: "duplicate", status: "error" },
-                { id: "silhouette", status: "error" },
-            ]),
-        ).toBe(false);
-        expect(allowsAutomaticQualityRepair([{ id: "silhouette", status: "warning" }])).toBe(false);
     });
 });

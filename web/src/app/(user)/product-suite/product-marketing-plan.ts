@@ -1,3 +1,5 @@
+import { buildCampaignStyleLock, buildProductScenePlan, sceneInstructionForTask, type ProductScenePlan } from "./product-marketing-scene-plan";
+
 export type MarketingTaskId = "marketplace" | "hero" | "feature" | "lifestyle" | "detail" | "aplus" | "banner" | "poster";
 
 export type IdentityPolicy = "source-locked" | "multi-view" | "detail-crop";
@@ -26,6 +28,7 @@ export type CampaignOptions = {
     platform: string;
     visualStyle: string;
     brandColor: string;
+    brandColorPreset: "auto" | "black" | "blue" | "red" | "green" | "orange" | "custom";
 };
 
 export const defaultCampaignOptions: CampaignOptions = {
@@ -34,6 +37,7 @@ export const defaultCampaignOptions: CampaignOptions = {
     platform: "Amazon",
     visualStyle: "自动匹配",
     brandColor: "#6d3df5",
+    brandColorPreset: "auto",
 };
 
 export const marketingPlan: MarketingTaskDefinition[] = [
@@ -191,7 +195,7 @@ const singleViewCameraLabels: Record<MarketingTaskId, string> = {
     poster: "source-supported vertical editorial · 35mm",
 };
 
-export function buildCampaignManifest(brief: string, options: CampaignOptions, sourceCount: number) {
+export function buildCampaignManifest(brief: string, options: CampaignOptions, sourceCount: number, scenePlan: ProductScenePlan = buildProductScenePlan(brief)) {
     const verifiedBrief = brief.trim() ? `USER-VERIFIED FACTS: ${brief.trim()}` : "No written facts were supplied. Use only details and benefits directly visible in the product references.";
     const sourceEvidence =
         sourceCount > 1
@@ -202,13 +206,24 @@ export function buildCampaignManifest(brief: string, options: CampaignOptions, s
         sourceEvidence,
         verifiedBrief,
         `MARKET: ${options.market}. PLATFORM: ${options.platform}. OUTPUT LANGUAGE: ${options.language}.`,
-        `VISUAL SYSTEM: ${options.visualStyle}; brand accent ${options.brandColor}; premium cross-border ecommerce photography; coherent light behavior and color hierarchy without repeating composition.`,
+        `PRODUCT CONTEXT: ${scenePlan.label}. The original product references remain the authority when visible evidence conflicts with text.`,
+        buildCampaignStyleLock(options, scenePlan),
+        "CATALOG EXCEPTION: the marketplace white-background image follows marketplace compliance. The seven campaign images from brand hero through vertical poster must share the campaign Visual DNA above.",
         "SET DIVERSITY CONTRACT: the eight outputs must use distinct camera families, proof forms, crop distances, and product-to-scene relationships. A shared product does not mean a repeated product pose.",
     ].join("\n");
 }
 
-export function buildMarketingPrompt(input: { task: MarketingTaskDefinition; campaignManifest: string; sourceCount: number; repairRequest?: string; hasRepairDraft?: boolean }) {
-    const { task, campaignManifest, sourceCount, repairRequest = "", hasRepairDraft = false } = input;
+export function buildMarketingPrompt(input: {
+    task: MarketingTaskDefinition;
+    campaignManifest: string;
+    sourceCount: number;
+    scenePlan?: ProductScenePlan;
+    referenceRoleContract?: string;
+    hasStyleReference?: boolean;
+    repairRequest?: string;
+    hasRepairDraft?: boolean;
+}) {
+    const { task, campaignManifest, sourceCount, scenePlan = buildProductScenePlan(""), referenceRoleContract = "", hasStyleReference = false, repairRequest = "", hasRepairDraft = false } = input;
     const cameraContract = sourceCount > 1 ? task.cameraContract : task.singleViewCameraContract;
     const scene = sourceCount > 1 ? task.scene : task.singleViewScene || task.scene;
     const cameraLabel = sourceCount > 1 ? task.cameraLabel : singleViewCameraLabels[task.id];
@@ -243,10 +258,17 @@ export function buildMarketingPrompt(input: { task: MarketingTaskDefinition; cam
             ? "CAMERA COMPLIANCE IS A DELIVERY GATE: changing only background, lighting, crop, or focal length while keeping the same product pose and occlusion pattern is a failed result."
             : "SINGLE-VIEW IDENTITY SAFETY OVERRIDES LARGE CAMERA ROTATION: use layout, crop distance, limited elevation, and environment to create distinction without fabricating unseen geometry.",
         "All uploaded source photographs depict one exact product. They are evidence, not extra products to place in the output.",
+        referenceRoleContract,
+        hasStyleReference
+            ? "CAMPAIGN STYLE ANCHOR: use the designated brand-hero reference only for lighting direction, shadow softness, color temperature, contrast, background material family, prop restraint, and finishing. Never use it to override product geometry from the original product references, and do not copy its composition."
+            : task.id === "hero"
+              ? "STYLE-BASELINE TASK: establish one clear, repeatable lighting, palette, material, and finishing signature for all later campaign images."
+              : "",
         campaignManifest,
         `PICTURE-SOLO CONTRACT: ${pictureSoloStatement}`,
         viewRule,
         repairClause,
+        sceneInstructionForTask(scenePlan, task.id),
         scene,
         "Render one independent final commercial image only. Integrate the product with physically credible scale, contact, reflections, perspective, and directional light.",
         "Preserve native product text and logos when visible. Add no fabricated words, letters, numbers, specifications, certifications, prices, ratings, interface controls, stock marks, or watermarks.",
@@ -263,6 +285,13 @@ export function taskById(id: MarketingTaskId) {
 export function selectedPlan(ids: MarketingTaskId[]) {
     const selected = new Set(ids);
     return marketingPlan.filter((task) => selected.has(task.id));
+}
+
+export function normalizeMarketingSelection(ids: MarketingTaskId[]) {
+    const selected = new Set(ids);
+    const needsStyleAnchor = marketingPlan.some((task) => task.id !== "marketplace" && task.id !== "hero" && selected.has(task.id));
+    if (needsStyleAnchor) selected.add("hero");
+    return marketingPlan.filter((task) => selected.has(task.id)).map((task) => task.id);
 }
 
 export function estimateSuiteCost(count: number) {
@@ -282,7 +311,7 @@ export function suiteBlockerIds(selectedIds: MarketingTaskId[], tasks: SuiteGate
         .filter((definition) => {
             if (!selected.has(definition.id)) return true;
             const task = tasks.find((item) => item.id === definition.id);
-            return task?.status !== "completed" || task.qualityStatus !== "pass" || !task.hasResult;
+            return task?.status !== "completed" || !task.hasResult;
         })
         .map((task) => task.id);
 }

@@ -1,5 +1,5 @@
 const HOST = "ic.xinglinhui.com";
-const CACHE_VERSION = "v3-20260819";
+const CACHE_VERSION = "v4-20260820";
 
 const BYPASS_HEADERS = [
   "authorization",

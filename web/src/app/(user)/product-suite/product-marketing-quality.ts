@@ -1,7 +1,7 @@
 "use client";
 
 import { auditProductTextIdentity } from "./product-identity-ocr";
-import { componentEvidence, evaluateGeometryEvidence, hasRepeatedProductInstance, isRepeatedProductView, requiresProductCountCheck } from "./product-marketing-quality-rules";
+import { componentEvidence, evaluateGeometryEvidence, hasRepeatedProductInstance, requiresProductCountCheck } from "./product-marketing-quality-rules";
 import type { IdentityPolicy, MarketingTaskId } from "./product-marketing-plan";
 import { referenceProductCutout } from "./product-reference-selection";
 
@@ -9,7 +9,7 @@ export type MarketingQualityStatus = "pending" | "pass" | "warning" | "inconclus
 type MarketingQualityCheckStatus = "pass" | "warning" | "inconclusive" | "error";
 
 export type MarketingQualityCheck = {
-    id: "dimensions" | "render" | "product-color" | "product-text-unexpected" | "product-text-missing" | "product-count" | "silhouette" | "marketplace" | "duplicate" | "view-diversity" | "campaign";
+    id: "dimensions" | "render" | "product-color" | "product-text-unexpected" | "product-text-missing" | "product-count" | "silhouette" | "marketplace" | "duplicate";
     label: string;
     status: MarketingQualityCheckStatus;
     detail: string;
@@ -29,7 +29,6 @@ type AuditInput = {
     resultUrl: string;
     identityUrl?: string;
     expectedSize: string;
-    heroUrl?: string;
     signal?: AbortSignal;
     identityPolicy?: IdentityPolicy;
     distinctViewCount?: number;
@@ -43,7 +42,6 @@ type ImageSample = {
     luminance: number[];
     hash: string;
     palette: Array<[number, number, number]>;
-    histogram: number[];
 };
 
 const sampleSize = 96;
@@ -108,9 +106,8 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
     throwIfAborted(input.signal);
     const identityPolicy = input.identityPolicy || "source-locked";
     const distinctViewCount = input.distinctViewCount ?? input.sources.length;
-    const [result, hero, previous, sourceProducts] = await Promise.all([
+    const [result, previous, sourceProducts] = await Promise.all([
         sampleImage(input.resultUrl, input.signal),
-        input.heroUrl ? optionalImageSample(input.heroUrl, input.signal) : Promise.resolve(null),
         Promise.all(
             input.previousResults.map(async (item) => {
                 const sample = await optionalImageSample(item.url, input.signal);
@@ -151,8 +148,6 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
 
     const extractedProductColors = sourceProducts.flatMap((sample) => sample?.palette || []);
     const productPalette = mergePalettes(extractedProductColors);
-    let resultShapeForDiversity: SilhouetteSample | null = null;
-
     if (["hero", "marketplace", "feature", "lifestyle", "detail", "aplus", "banner", "poster"].includes(input.taskId)) {
         try {
             const primarySubjectOnly = identityPolicy !== "source-locked" || ["feature", "detail", "aplus"].includes(input.taskId);
@@ -182,10 +177,6 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
             );
             const best = matches.sort((left, right) => right.score - left.score)[0];
             const { direct, mirrored, detailSimilarity, mirroredDetails, salientDetails, aspectDelta, resultCandidate } = best;
-            resultShapeForDiversity = {
-                ...resultShape,
-                ...resultCandidate,
-            };
             const isMirrored = mirrored > direct + 0.07 && mirroredDetails > detailSimilarity + 0.06 && mirrored >= 0.42;
             const productColorCoverage = paletteCoverage(resultCandidate.pixels, productPalette);
             const colorStatus = !productPalette.length ? "warning" : productColorCoverage >= 0.08 ? "pass" : productColorCoverage >= 0.03 ? "warning" : "error";
@@ -256,84 +247,6 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
         }
     }
 
-    if (identityPolicy !== "detail-crop" && resultShapeForDiversity && distinctViewCount > 1) {
-        try {
-            const comparable = input.previousResults.filter((item) => item.id !== "detail");
-            const previousShapes = (
-                await Promise.all(
-                    comparable.map(async (item) => {
-                        let sample: SilhouetteSample;
-                        try {
-                            sample = await resultSilhouette(item.url, true, input.signal);
-                        } catch (error) {
-                            if (error instanceof DOMException && error.name === "AbortError") {
-                                throw error;
-                            }
-                            return null;
-                        }
-                        const candidate = (sample.candidates.length ? sample.candidates : [sample])
-                            .map((shape) => {
-                                const overlap = maskIou(shape.mask, resultShapeForDiversity.mask, false);
-                                const edge = edgeSimilarity(shape.edges, resultShapeForDiversity.edges, false);
-                                const aspect = Math.abs(shape.aspect - resultShapeForDiversity.aspect) / Math.max(0.01, shape.aspect);
-                                return {
-                                    shape,
-                                    score: overlap * 0.65 + edge * 0.35 - Math.min(1, aspect) * 0.1,
-                                };
-                            })
-                            .sort((left, right) => right.score - left.score)[0]?.shape;
-                        return {
-                            ...item,
-                            shape: candidate || sample,
-                        };
-                    }),
-                )
-            ).filter((item): item is NonNullable<typeof item> => item !== null);
-            const repeatedView = previousShapes.find(({ shape }) => {
-                const directOverlap = maskIou(shape.mask, resultShapeForDiversity.mask, false);
-                const mirroredOverlap = maskIou(shape.mask, resultShapeForDiversity.mask, true);
-                const directEdge = edgeSimilarity(shape.edges, resultShapeForDiversity.edges, false);
-                const mirroredEdge = edgeSimilarity(shape.edges, resultShapeForDiversity.edges, true);
-                const aspect = Math.abs(shape.aspect - resultShapeForDiversity.aspect) / Math.max(0.01, shape.aspect);
-                return (
-                    isRepeatedProductView({
-                        overlap: directOverlap,
-                        edgeSimilarity: directEdge,
-                        aspectDelta: aspect,
-                    }) ||
-                    isRepeatedProductView({
-                        overlap: mirroredOverlap,
-                        edgeSimilarity: mirroredEdge,
-                        aspectDelta: aspect,
-                    })
-                );
-            });
-            checks.push({
-                id: "view-diversity",
-                label: "镜头差异",
-                status: repeatedView ? "error" : "pass",
-                detail: repeatedView ? `商品镜头与“${repeatedView.label}”过于相似，需要更换机位` : `商品机位与 ${previousShapes.length} 个可用历史镜头存在明确差异`,
-            });
-        } catch (error) {
-            rethrowAbort(error);
-            checks.push({
-                id: "view-diversity",
-                label: "镜头差异",
-                status: "inconclusive",
-                detail: "历史镜头对比暂不可用；结果保留待免费重新质检",
-            });
-        }
-    } else if (identityPolicy !== "detail-crop" && resultShapeForDiversity) {
-        const comparable = previous.filter((item) => item.id !== "detail");
-        const repeatedComposition = comparable.find((item) => hammingDistance(result.hash, item.sample.hash) <= 6 && pixelDifference(result.pixels, item.sample.pixels) <= 0.08);
-        checks.push({
-            id: "view-diversity",
-            label: "单图安全差异",
-            status: repeatedComposition ? "error" : "pass",
-            detail: repeatedComposition ? `整幅构图与“${repeatedComposition.label}”过于相似；请改变场景、主体尺度或版式，但不要虚构隐藏结构` : `在保持来源可见面的前提下，与 ${comparable.length} 个历史任务的整幅构图存在差异`,
-        });
-    }
-
     try {
         const identity = await auditProductTextIdentity(input.sources, input.identityUrl || input.resultUrl, input.signal, {
             requireSourceText: identityPolicy === "source-locked",
@@ -372,26 +285,16 @@ export async function auditMarketingImage(input: AuditInput): Promise<MarketingQ
     checks.push({
         id: "duplicate",
         label: "任务差异",
-        status: duplicate ? "error" : "pass",
-        detail: duplicate ? `与“${duplicate.label}”几乎重复` : "未发现与已完成任务重复",
+        status: duplicate ? "warning" : "pass",
+        detail: duplicate ? `与“${duplicate.label}”接近；结果仍保留，由用户决定是否重新生成` : "未发现与已完成任务完全重复",
     });
-
-    if (hero && ["feature", "lifestyle", "detail", "aplus", "banner", "poster"].includes(input.taskId)) {
-        const similarity = cosineSimilarity(result.histogram, hero.histogram);
-        checks.push({
-            id: "campaign",
-            label: "整套风格",
-            status: similarity >= 0.28 ? "pass" : "warning",
-            detail: `与品牌主视觉的色彩/明暗关联 ${Math.round(similarity * 100)}%`,
-        });
-    }
 
     const errors = checks.filter((check) => check.status === "error");
     const warnings = checks.filter((check) => check.status === "warning");
     const inconclusive = checks.filter((check) => check.status === "inconclusive");
     const score = Math.max(0, 100 - errors.length * 35 - warnings.length * 12 - inconclusive.length * 6);
     const status: MarketingQualityStatus = errors.length ? "error" : inconclusive.length ? "inconclusive" : warnings.length ? "warning" : "pass";
-    const summary = errors.length ? errors.map((check) => check.detail).join("；") : inconclusive.length ? inconclusive.map((check) => check.detail).join("；") : warnings.length ? warnings.map((check) => check.detail).join("；") : "自动质检通过";
+    const summary = errors.length ? errors.map((check) => check.detail).join("；") : inconclusive.length ? inconclusive.map((check) => check.detail).join("；") : warnings.length ? warnings.map((check) => check.detail).join("；") : "基础技术校验通过";
     return { status, score, summary, checks };
 }
 
@@ -420,7 +323,6 @@ async function sampleImage(source: Blob | string, signal?: AbortSignal): Promise
         luminance,
         hash: averageHash(luminance),
         palette: extractPalette(pixels),
-        histogram: colorHistogram(pixels),
     };
     bitmap.close();
     return sample;
@@ -530,29 +432,6 @@ function averageHash(luminance: number[]) {
     }
     const average = values.reduce((sum, value) => sum + value, 0) / values.length;
     return values.map((value) => (value >= average ? "1" : "0")).join("");
-}
-
-function colorHistogram(pixels: Uint8ClampedArray) {
-    const histogram = new Array<number>(64).fill(0);
-    for (let index = 0; index < pixels.length; index += 4) {
-        const r = Math.min(3, Math.floor(pixels[index] / 64));
-        const g = Math.min(3, Math.floor(pixels[index + 1] / 64));
-        const b = Math.min(3, Math.floor(pixels[index + 2] / 64));
-        histogram[r * 16 + g * 4 + b] += 1;
-    }
-    return histogram;
-}
-
-function cosineSimilarity(left: number[], right: number[]) {
-    let dot = 0;
-    let leftLength = 0;
-    let rightLength = 0;
-    for (let index = 0; index < left.length; index += 1) {
-        dot += left[index] * right[index];
-        leftLength += left[index] ** 2;
-        rightLength += right[index] ** 2;
-    }
-    return dot / Math.max(1, Math.sqrt(leftLength * rightLength));
 }
 
 function hammingDistance(left: string, right: string) {

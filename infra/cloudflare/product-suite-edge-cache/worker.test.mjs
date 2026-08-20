@@ -180,7 +180,7 @@ test("cache key is versioned and varies on content encoding", () => {
 
   assert.match(
     new URL(gzipKey.url).pathname,
-    /^\/__product_suite_edge_cache\/v3-20260819\//,
+    /^\/__product_suite_edge_cache\/v4-20260820\//,
   );
   assert.equal(gzipKey.headers.get("accept-encoding"), "gzip");
   assert.equal(brKey.headers.get("accept-encoding"), "br");

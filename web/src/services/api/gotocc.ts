@@ -154,11 +154,12 @@ export async function generateGotoccProductImage(connection: GotoccConnection, i
         const item = payload?.data?.[0];
         const value = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : item?.url || "";
         if (!value) throw new GotoccGenerationError("gotocc 没有返回商品图；付费状态可能已产生，请先核对 gotocc 记录", false, true);
+        signal?.removeEventListener("abort", abort);
+        window.clearTimeout(timeout);
         try {
-            return await imageToDataUrl({ dataUrl: value, signal: controller.signal });
-        } catch (error) {
-            if (error instanceof DOMException && error.name === "AbortError") throw error;
-            throw new GotoccGenerationError("付费结果读取失败，请先核对 gotocc 记录再决定是否重试", false, true);
+            return await imageToDataUrl({ dataUrl: value });
+        } catch {
+            return value;
         }
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {

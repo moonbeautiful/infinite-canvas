@@ -1,7 +1,8 @@
 // @ts-nocheck -- Bun provides the test runner in deployment tooling, not Next's type environment.
 import { describe, expect, test } from "bun:test";
 
-import { buildCampaignManifest, buildMarketingPrompt, defaultCampaignOptions, isCompleteMarketingSuite, marketingPlan } from "./product-marketing-plan";
+import { buildCampaignManifest, buildMarketingPrompt, defaultCampaignOptions, isCompleteMarketingSuite, marketingPlan, normalizeMarketingSelection } from "./product-marketing-plan";
+import { buildProductScenePlan } from "./product-marketing-scene-plan";
 
 describe("product marketing task matrix", () => {
     test("defines eight distinct commercial outputs", () => {
@@ -16,8 +17,15 @@ describe("product marketing task matrix", () => {
         expect(marketingPlan.filter((task) => task.identityPolicy === "detail-crop")[0]?.id).toBe("detail");
     });
 
+    test("automatically includes the brand hero whenever a dependent campaign image is selected", () => {
+        expect(normalizeMarketingSelection(["lifestyle"])).toEqual(["hero", "lifestyle"]);
+        expect(normalizeMarketingSelection(["marketplace"])).toEqual(["marketplace"]);
+        expect(normalizeMarketingSelection(["marketplace", "hero", "poster"])).toEqual(["marketplace", "hero", "poster"]);
+    });
+
     test("builds camera-specific prompts without globally freezing perspective", () => {
-        const manifest = buildCampaignManifest("black motorcycle; red rear panel", defaultCampaignOptions, 3);
+        const scenePlan = buildProductScenePlan("black motorcycle; red rear panel");
+        const manifest = buildCampaignManifest("black motorcycle; red rear panel", defaultCampaignOptions, 3, scenePlan);
         const hero = marketingPlan.find((task) => task.id === "hero");
         if (!hero) throw new Error("hero task missing");
 
@@ -25,6 +33,7 @@ describe("product marketing task matrix", () => {
             task: hero,
             campaignManifest: manifest,
             sourceCount: 3,
+            scenePlan,
         });
 
         expect(prompt).toContain("低机位 3/4");
@@ -33,7 +42,30 @@ describe("product marketing task matrix", () => {
         expect(prompt).toContain("HARD CAMERA CONTRACT");
         expect(prompt).toContain("SET SHOT MAP");
         expect(prompt).toContain("changing only background, lighting, crop, or focal length");
+        expect(prompt).toContain("STYLE-BASELINE TASK");
+        expect(prompt).toContain("controlled workshop-to-outdoor campaign set");
+        expect(prompt).toContain("CAMPAIGN VISUAL DNA");
         expect(prompt).not.toContain("keep the primary reference perspective");
+    });
+
+    test("uses the brand hero as an explicit downstream style anchor", () => {
+        const scenePlan = buildProductScenePlan("扫地机器人");
+        const lifestyle = marketingPlan.find((task) => task.id === "lifestyle");
+        if (!lifestyle) throw new Error("lifestyle task missing");
+
+        const prompt = buildMarketingPrompt({
+            task: lifestyle,
+            campaignManifest: buildCampaignManifest("扫地机器人", defaultCampaignOptions, 1, scenePlan),
+            sourceCount: 1,
+            scenePlan,
+            hasStyleReference: true,
+            referenceRoleContract: "REFERENCE ROLE CONTRACT: Reference 01 = original product identity authority; Reference 02 = brand-hero style anchor only.",
+        });
+
+        expect(prompt).toContain("CAMPAIGN STYLE ANCHOR");
+        expect(prompt).toContain("brand-hero style anchor only");
+        expect(prompt).toContain("modern bedroom or living room floor");
+        expect(prompt).toContain("never place it on a table");
     });
 
     test("allows a repetition repair to change the camera", () => {
@@ -80,11 +112,26 @@ describe("product marketing task matrix", () => {
         expect(prompt).not.toContain("CAMERA COMPLIANCE IS A DELIVERY GATE");
     });
 
-    test.each(["warning", "inconclusive", "error"])("does not unlock ZIP when one task is %s", (qualityStatus) => {
+    test.each(["warning", "inconclusive"])("keeps user-visible results downloadable when one task is %s", (qualityStatus) => {
         const tasks = marketingPlan.map((task, index) => ({
             id: task.id,
             status: "completed",
             qualityStatus: index === 3 ? qualityStatus : "pass",
+            hasResult: true,
+        }));
+        expect(
+            isCompleteMarketingSuite(
+                marketingPlan.map((task) => task.id),
+                tasks,
+            ),
+        ).toBe(true);
+    });
+
+    test("does not unlock ZIP when one task failed", () => {
+        const tasks = marketingPlan.map((task, index) => ({
+            id: task.id,
+            status: index === 3 ? "error" : "completed",
+            qualityStatus: index === 3 ? "error" : "pass",
             hasResult: true,
         }));
         expect(

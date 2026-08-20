@@ -23,7 +23,6 @@ export type ComponentEvidence = {
 const wideCameraTasks = new Set<MarketingTaskId>(["lifestyle", "banner", "poster"]);
 
 const productCountCheckTasks = new Set<MarketingTaskId>(["marketplace", "hero", "feature", "lifestyle", "aplus", "banner", "poster"]);
-const automaticRepairCheckIds = new Set(["dimensions", "render", "product-text-unexpected", "marketplace", "duplicate"]);
 
 export function evaluateGeometryEvidence(identityPolicy: IdentityPolicy, taskId: MarketingTaskId, evidence: GeometryEvidence, sourceCount: number): QualityDecision {
     const { direct, mirrored, detailSimilarity, mirroredDetails, aspectDelta, salientAverage, salientLowerQuartile, salientSampleCount } = evidence;
@@ -59,12 +58,6 @@ export function evaluateGeometryEvidence(identityPolicy: IdentityPolicy, taskId:
     return warning ? "warning" : "pass";
 }
 
-export function isRepeatedProductView(input: { overlap: number; edgeSimilarity: number; aspectDelta: number }) {
-    const { overlap, edgeSimilarity, aspectDelta } = input;
-    const poseScore = overlap * 0.65 + edgeSimilarity * 0.35;
-    return aspectDelta <= 0.18 && overlap >= 0.68 && edgeSimilarity >= 0.3 && poseScore >= 0.56;
-}
-
 export function componentEvidence(componentAreas: number[], duplicateShapeSimilarity = 0, duplicatePairAreaRatio?: number): ComponentEvidence {
     const sorted = componentAreas.filter((area) => area > 0).sort((left, right) => right - left);
     if (!sorted.length) {
@@ -90,11 +83,6 @@ export function componentEvidence(componentAreas: number[], duplicateShapeSimila
 export function hasRepeatedProductInstance(taskId: MarketingTaskId, evidence: ComponentEvidence, expectedProductCount = 1) {
     const allowedContextComponents = taskId === "lifestyle" && expectedProductCount > 1 ? 1 : 0;
     return productCountCheckTasks.has(taskId) && evidence.significantCount > Math.max(1, expectedProductCount) + allowedContextComponents && evidence.duplicatePairAreaRatio >= 0.35 && evidence.duplicateShapeSimilarity >= 0.52;
-}
-
-export function allowsAutomaticQualityRepair(checks: Array<{ id: string; status: string }>) {
-    const errors = checks.filter((check) => check.status === "error");
-    return errors.length > 0 && errors.every((check) => automaticRepairCheckIds.has(check.id));
 }
 
 export function requiresProductCountCheck(taskId: MarketingTaskId) {
